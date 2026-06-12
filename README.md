@@ -1,31 +1,19 @@
-# aicommit
+# @chof64/aicommit
 
 AI-powered commit message generator. Reads your staged `git diff`, sends it
 to the [opencode.ai zen](https://opencode.ai) chat completions API, and
 writes a conventional-commit message after a quick confirmation prompt.
 
-No dependencies — Python 3 standard library only.
-
 ## Requirements
 
-- Python 3.6+
+- Node.js **20+** (uses native `fetch`)
 - `git` on `PATH`
 - An [opencode.ai](https://opencode.ai) API key exposed as `OPENCODE_API_KEY`
 
 ## Install
 
-Drop the script somewhere on your `PATH` and `chmod +x` it. For example:
-
 ```sh
-curl -o ~/.local/bin/aicommit https://raw.githubusercontent.com/chof64/aicommit/main/aicommit
-chmod +x ~/.local/bin/aicommit
-```
-
-Or clone and link:
-
-```sh
-git clone https://github.com/chof64/aicommit.git ~/Developer/aicommit
-ln -s ~/Developer/aicommit/aicommit ~/.local/bin/aicommit
+npm i -g @chof64/aicommit
 ```
 
 ## Configure
@@ -48,18 +36,21 @@ aicommit
 Add a hint to steer the message — useful for non-obvious diffs:
 
 ```sh
-git add src/auth.py
+git add src/auth.ts
 aicommit fix race in token refresh
 ```
 
-Other flags:
+Flags:
 
-| Flag        | Description                                              |
-| ----------- | -------------------------------------------------------- |
-| `--dry-run` | Print the generated message, do not commit.              |
-| `-v` / `--verbose` | Echo verbose progress to stderr (network, retries). |
+| Flag              | Description                                              |
+| ----------------- | -------------------------------------------------------- |
+| `--dry-run`       | Print the generated message, do not commit.              |
+| `-v` / `--verbose`| Echo verbose progress to stderr (network, retries).     |
+| `-V` / `--version`| Print the version and exit.                              |
+| `-h` / `--help`   | Print the help text and exit.                            |
 
-You will always be asked to confirm before `git commit` runs.
+You will always be asked to confirm before `git commit` runs. Press `n` (or
+`N`) to abort; anything else (including just hitting Enter) confirms.
 
 ## How it works
 
@@ -70,8 +61,8 @@ You will always be asked to confirm before `git commit` runs.
    (`<type>: <description>`).
 4. Shows you the result, waits for `Y/n`, then runs `git commit -m`.
 
-The full prompt sent to the model is in [`aicommit`](./aicommit) — see
-`build_messages` and the module-level `ENDPOINT` / `MODEL` constants.
+The full prompt sent to the model is in
+[`src/config.ts`](./src/config.ts) — see `SYSTEM_PROMPT` and `USER_PROMPT_TAIL`.
 
 ## License
 
