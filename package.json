@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsup",
+    "typecheck": "tsc --noEmit -p test/tsconfig.json",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",

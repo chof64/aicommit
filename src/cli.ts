@@ -3,7 +3,12 @@ import { Command } from "commander";
 import { buildMessages, callWithRetry, parseCommitMessage } from "./api.js";
 import { executeCommit, getStagedDiff } from "./git.js";
 import { log, logError, logVerbose, setVerbose } from "./logger.js";
-import type { CliOptions } from "./types.js";
+
+/** Parsed CLI options (subset of commander's parsed result). */
+export interface CliOptions {
+  dryRun?: boolean;
+  verbose?: boolean;
+}
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };

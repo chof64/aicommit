@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildMessages, callWithRetry, parseCommitMessage } from "../src/api.js";
-import { MAX_RETRIES, RETRY_DELAY_MS, SYSTEM_PROMPT } from "../src/config.js";
-import type { ApiResponse } from "../src/types.js";
+import type { ApiResponse } from "../src/api.js";
+import {
+  buildMessages,
+  callWithRetry,
+  MAX_RETRIES,
+  parseCommitMessage,
+  RETRY_DELAY_MS,
+  SYSTEM_PROMPT,
+} from "../src/api.js";
 
 describe("buildMessages", () => {
   it("produces a system message and a user message", () => {
