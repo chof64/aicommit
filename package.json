@@ -4,6 +4,10 @@
   "description": "AI-powered commit message generator using opencode.ai zen",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chof64/aicommit.git"
+  },
   "engines": {
     "node": ">=20"
   },
