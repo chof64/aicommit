@@ -9,27 +9,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   checks:
-    name: lint / typecheck / test / build (node ${{ matrix.node }})
+    name: lint / typecheck / test / build (node 22)
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["20", "22"]
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: "22"
           cache: npm
 
       - run: npm ci
 
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm test
-      - run: npm run lint
       - run: npm run build
