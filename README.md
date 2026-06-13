@@ -64,6 +64,29 @@ You will always be asked to confirm before `git commit` runs. Press `n` (or
 The full prompt sent to the model is in
 [`src/config.ts`](./src/config.ts) — see `SYSTEM_PROMPT` and `USER_PROMPT_TAIL`.
 
+## About
+
+aicommit was created as a personal script to use AI in writing commit
+messages. It was a simple tool, and a way for me to learn scripting. It
+started as a Python script (with a shebang) on my Mac, but I found good
+use for it, so I migrated it to TypeScript and published it to npm.
+
+It may not be as feature rich as other similar tools — still new, and
+under development — but it's the first project of mine on npm, and
+the first with (planned) CI/CD workflows that automate development,
+testing and deployment.
+
+## What's next
+
+I'm planning to add a few features as time goes on:
+
+- **Customizable commit types** — including support for the Angular
+  convention
+- **Multiple AI models** — flexibility in which model to use, with OpenAI
+  API compatibility
+- **Optimizations** — to the current version and the prompt
+- **Tests** — coverage for the core flow
+
 ## License
 
 [MIT](./LICENSE)
