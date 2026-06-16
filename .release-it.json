@@ -1,0 +1,29 @@
+{
+  "git": {
+    "commitMessage": "chore(release): ${version}",
+    "tagName": "v${version}",
+    "tagAnnotation": "Release ${version}",
+    "push": true,
+    "requireBranch": "main",
+    "requireCleanWorkingDir": false
+  },
+  "github": {
+    "release": true,
+    "releaseName": "v${version}",
+    "autoGenerate": false
+  },
+  "npm": {
+    "publish": true,
+    "access": "public",
+    "publishPath": "."
+  },
+  "plugins": {
+    "@release-it/conventional-changelog": {
+      "preset": "conventionalcommits",
+      "infile": false
+    }
+  },
+  "hooks": {
+    "before:init": ["npm test", "npm run lint"]
+  }
+}
