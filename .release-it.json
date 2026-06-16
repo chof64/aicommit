@@ -15,7 +15,8 @@
   "npm": {
     "publish": true,
     "access": "public",
-    "publishPath": "."
+    "publishPath": ".",
+    "skipChecks": true
   },
   "plugins": {
     "@release-it/conventional-changelog": {
