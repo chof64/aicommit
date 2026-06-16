@@ -3,7 +3,6 @@ import type { ApiResponse } from "../src/api.js";
 import {
   buildMessages,
   callWithRetry,
-  categorizeError,
   MAX_RETRIES,
   parseCommitMessage,
   RETRY_DELAY_MS,
@@ -195,40 +194,54 @@ describe("callWithRetry", () => {
   });
 });
 
-describe("categorizeError", () => {
-  it("returns auth for 401 and 403", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 401 })).category).toBe("auth");
-    expect(categorizeError(new HttpApiError("x", { status: 403 })).category).toBe("auth");
+describe("HttpApiError.fromResponse", () => {
+  it("maps 401 and 403 to auth with a verification hint", () => {
+    const e401 = HttpApiError.fromResponse(401, "Unauthorized", "");
+    expect(e401.category).toBe("auth");
+    expect(e401.shouldRetry).toBe(false);
+    expect(e401.suggestions.some((s) => /OPENCODE_API_KEY/.test(s))).toBe(true);
+
+    const e403 = HttpApiError.fromResponse(403, "Forbidden", "");
+    expect(e403.category).toBe("auth");
   });
 
-  it("returns rate-limit for 429", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 429 })).category).toBe("rate-limit");
+  it("maps 429 to rate-limit and is not retriable", () => {
+    const e = HttpApiError.fromResponse(429, "Too Many Requests", "");
+    expect(e.category).toBe("rate-limit");
+    expect(e.shouldRetry).toBe(false);
   });
 
-  it("returns bad-request for 400", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 400 })).category).toBe("bad-request");
+  it("maps 400 to bad-request and is not retriable", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", "");
+    expect(e.category).toBe("bad-request");
+    expect(e.shouldRetry).toBe(false);
   });
 
-  it("returns server for 5xx", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 500 })).category).toBe("server");
-    expect(categorizeError(new HttpApiError("x", { status: 502 })).category).toBe("server");
+  it("maps 5xx to server and marks it retriable", () => {
+    for (const s of [500, 502, 503]) {
+      const e = HttpApiError.fromResponse(s, "x", "");
+      expect(e.category).toBe("server");
+      expect(e.shouldRetry).toBe(true);
+    }
   });
 
-  it("returns timeout for TimeoutError, AbortError, and 408", () => {
-    expect(categorizeError(new TimeoutError("t")).category).toBe("timeout");
-    const abort = new Error("a");
-    abort.name = "AbortError";
-    expect(categorizeError(abort).category).toBe("timeout");
-    expect(categorizeError(new HttpApiError("x", { status: 408 })).category).toBe("timeout");
+  it("maps 408 to timeout and is not retriable", () => {
+    const e = HttpApiError.fromResponse(408, "Request Timeout", "");
+    expect(e.category).toBe("timeout");
+    expect(e.shouldRetry).toBe(false);
   });
 
-  it("returns network for TypeError", () => {
-    expect(categorizeError(new TypeError("ECONNREFUSED")).category).toBe("network");
+  it("falls through to unknown for unrecognized statuses", () => {
+    const e = HttpApiError.fromResponse(418, "I'm a teapot", "");
+    expect(e.category).toBe("unknown");
+    expect(e.shouldRetry).toBe(false);
   });
 
-  it("returns unknown for unrecognized errors", () => {
-    expect(categorizeError(new Error("weird")).category).toBe("unknown");
-    expect(categorizeError("string error").category).toBe("unknown");
+  it("includes the status text and body snippet in the message", () => {
+    const e = HttpApiError.fromResponse(500, "Internal Server Error", "boom");
+    expect(e.message).toContain("500");
+    expect(e.message).toContain("Internal Server Error");
+    expect(e.message).toContain("boom");
   });
 });
 

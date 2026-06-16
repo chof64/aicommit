@@ -1,5 +1,5 @@
-import { AicommitError, HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
-import { logError, logVerbose } from "./logger.js";
+import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
+import { logVerbose, logWarning } from "./logger.js";
 
 /** A single chat message in the OpenAI-compatible API format. */
 export interface ChatMessage {
@@ -44,85 +44,6 @@ export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
   ];
 }
 
-export type ErrorCategory =
-  | "auth"
-  | "rate-limit"
-  | "bad-request"
-  | "server"
-  | "timeout"
-  | "network"
-  | "unknown";
-
-export interface Categorization {
-  category: ErrorCategory;
-  suggestions: string[];
-  status?: number;
-}
-
-const NO_RETRY: ReadonlySet<ErrorCategory> = new Set([
-  "auth",
-  "rate-limit",
-  "bad-request",
-  "timeout",
-]);
-
-/** Pure: map any error to a category + user-facing suggestions + optional HTTP status. */
-export function categorizeError(err: unknown): Categorization {
-  if (err instanceof TimeoutError || (err instanceof Error && err.name === "AbortError")) {
-    return {
-      category: "timeout",
-      suggestions: ["Check your network", `Increase TIMEOUT_MS (currently ${TIMEOUT_MS / 1000}s)`],
-    };
-  }
-  if (err instanceof NetworkError || err instanceof TypeError) {
-    return {
-      category: "network",
-      suggestions: ["Check your internet connection"],
-    };
-  }
-  if (err instanceof HttpApiError) {
-    const status = err.status;
-    if (status === undefined) {
-      return { category: "unknown", suggestions: ["Run with -v for details"] };
-    }
-    if (status === 401 || status === 403) {
-      return { category: "auth", status, suggestions: ["Verify OPENCODE_API_KEY"] };
-    }
-    if (status === 429) {
-      return {
-        category: "rate-limit",
-        status,
-        suggestions: ["Wait and retry later", "Check your API quota"],
-      };
-    }
-    if (status === 400) {
-      return {
-        category: "bad-request",
-        status,
-        suggestions: ["The API rejected the request — try with a smaller diff"],
-      };
-    }
-    if (status === 408) {
-      return {
-        category: "timeout",
-        status,
-        suggestions: ["Check your network"],
-      };
-    }
-    if (status >= 500) {
-      return {
-        category: "server",
-        status,
-        suggestions: ["The API is having issues — try again shortly"],
-      };
-    }
-  }
-  return {
-    category: "unknown",
-    suggestions: ["Run with -v for details"],
-  };
-}
-
 /** Truncate a string for safe verbose logging. */
 export function redact(text: string, max = 80): string {
   if (text.length <= max) return text;
@@ -162,10 +83,7 @@ async function callOnce(
     } catch {
       // Body read failed; statusText is enough.
     }
-    const detail = bodySnippet
-      ? `HTTP ${response.status} ${response.statusText}: ${bodySnippet}`
-      : `HTTP ${response.status} ${response.statusText}`;
-    throw new HttpApiError(detail, { status: response.status });
+    throw HttpApiError.fromResponse(response.status, response.statusText, bodySnippet);
   }
 
   try {
@@ -192,17 +110,29 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
     } catch (err) {
       clearTimeout(timer);
       lastError = err;
-      const { category } = categorizeError(err);
+      const category =
+        err instanceof TimeoutError || (err instanceof Error && err.name === "AbortError")
+          ? "timeout"
+          : err instanceof Error && "category" in err
+            ? ((err as { category?: string }).category ?? "unknown")
+            : "unknown";
       logVerbose(
         `Retry attempt ${attempt + 1}/${MAX_RETRIES + 1} failed (${category}): ${err instanceof Error ? err.message : String(err)}`,
       );
 
-      if (NO_RETRY.has(category)) {
-        throw err;
-      }
+      // Decide retry purely from the error itself. The `shouldRetry` flag
+      // is set by the error's own constructor — for the API path that
+      // means `fromResponse` (transient 5xx only) and `NetworkError`.
+      const retriable =
+        err instanceof NetworkError ||
+        (err instanceof HttpApiError && err.shouldRetry) ||
+        // Raw AbortError never made it through to callOnce's catch — but
+        // be defensive: if it surfaces here, treat as a one-shot timeout.
+        (err instanceof Error && err.name === "AbortError" && attempt < MAX_RETRIES);
+      if (!retriable) throw err;
 
       if (attempt < MAX_RETRIES) {
-        logError(
+        logWarning(
           `API request failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}, ${category}), retrying in ${RETRY_DELAY_MS / 1000}s...`,
         );
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
@@ -210,7 +140,7 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
     }
   }
 
-  throw lastError instanceof AicommitError
+  throw lastError instanceof Error
     ? lastError
     : new ParseError("Failed to generate commit message", { cause: lastError });
 }

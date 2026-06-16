@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { Command } from "commander";
 import { buildMessages, callWithRetry, parseCommitMessage } from "./api.js";
-import { AicommitError, ConfigError, formatError, ValidationError } from "./errors.js";
+import { AbortError, AicommitError, ConfigError, formatError, ValidationError } from "./errors.js";
 import { executeCommit, getStagedDiff } from "./git.js";
 import { getVerbose, log, logError, logVerbose, reset, setVerbose } from "./logger.js";
 
@@ -74,9 +74,8 @@ function confirm(message: string): Promise<void> {
     rl.once("line", (line) => {
       cleanup();
       if (line.trim().toLowerCase() === "n") {
-        process.stdout.write("Aborted.\n");
-        // TODO(#32): replace this with a typed AbortError so the central funnel handles the exit code.
-        process.exit(0);
+        reject(new AbortError());
+        return;
       }
       resolve();
     });

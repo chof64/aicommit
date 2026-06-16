@@ -31,3 +31,8 @@ export function logVerbose(msg: string): void {
 export function logError(msg: string): void {
   process.stderr.write(`${msg}\n`);
 }
+
+/** Transient, non-fatal progress on stderr (e.g. "retrying…"). Distinct from logError. */
+export function logWarning(msg: string): void {
+  process.stderr.write(`! ${msg}\n`);
+}

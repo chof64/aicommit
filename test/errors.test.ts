@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { categorizeError, redact } from "../src/api.js";
+import { redact } from "../src/api.js";
 import {
+  AbortError,
   AicommitError,
   ConfigError,
+  ExitCode,
   formatError,
   GitError,
   HttpApiError,
@@ -13,7 +15,7 @@ import {
 } from "../src/errors.js";
 
 describe("error hierarchy", () => {
-  it("AicommitError subclasses set the right code and exitCode", () => {
+  it("AicommitError subclasses set the right code and category", () => {
     expect(new ConfigError("c").code).toBe("config");
     expect(new GitError("g").code).toBe("git");
     expect(new ValidationError("v").code).toBe("validation");
@@ -21,6 +23,10 @@ describe("error hierarchy", () => {
     expect(new TimeoutError("t").code).toBe("timeout");
     expect(new NetworkError("n").code).toBe("network");
     expect(new ParseError("p").code).toBe("parse");
+    expect(new AbortError().code).toBe("abort");
+  });
+
+  it("every subclass is an AicommitError", () => {
     for (const e of [
       new ConfigError("c"),
       new GitError("g"),
@@ -29,18 +35,52 @@ describe("error hierarchy", () => {
       new TimeoutError("t"),
       new NetworkError("n"),
       new ParseError("p"),
+      new AbortError(),
     ]) {
       expect(e).toBeInstanceOf(AicommitError);
-      expect(e.exitCode).toBe(1);
     }
   });
 
-  it("TimeoutError has status 408", () => {
-    expect(new TimeoutError("t").status).toBe(408);
+  it("TimeoutError has status 408 and is not retriable", () => {
+    const e = new TimeoutError("t");
+    expect(e.status).toBe(408);
+    expect(e.shouldRetry).toBe(false);
+    expect(e.category).toBe("timeout");
+  });
+
+  it("NetworkError is retriable and exits EX_UNAVAILABLE", () => {
+    const e = new NetworkError("n");
+    expect(e.shouldRetry).toBe(true);
+    expect(e.exitCode).toBe(ExitCode.EX_UNAVAILABLE);
+  });
+
+  it("ConfigError exits EX_USAGE", () => {
+    expect(new ConfigError("c").exitCode).toBe(ExitCode.EX_USAGE);
+  });
+
+  it("ValidationError exits EX_DATAERR", () => {
+    expect(new ValidationError("v").exitCode).toBe(ExitCode.EX_DATAERR);
+  });
+
+  it("ParseError exits EX_DATAERR", () => {
+    expect(new ParseError("p").exitCode).toBe(ExitCode.EX_DATAERR);
+  });
+
+  it("AbortError exits EX_ABORT and defaults its message", () => {
+    const e = new AbortError();
+    expect(e.exitCode).toBe(ExitCode.EX_ABORT);
+    expect(e.message).toBe("Aborted.");
+    expect(e.shouldRetry).toBe(false);
   });
 
   it("HttpApiError preserves the status", () => {
     expect(new HttpApiError("h", { status: 502 }).status).toBe(502);
+  });
+
+  it("HttpApiError defaults to category 'unknown' and no retry", () => {
+    const e = new HttpApiError("h", { status: 500 });
+    expect(e.category).toBe("unknown");
+    expect(e.shouldRetry).toBe(false);
   });
 
   it("cause and suggestions round-trip", () => {
@@ -48,6 +88,13 @@ describe("error hierarchy", () => {
     const e = new GitError("g", { cause, suggestions: ["hint"] });
     expect(e.cause).toBe(cause);
     expect(e.suggestions).toEqual(["hint"]);
+  });
+
+  it("suggestions array is frozen", () => {
+    const e = new GitError("g", { suggestions: ["a"] });
+    expect(() => {
+      (e.suggestions as string[]).push("b");
+    }).toThrow();
   });
 });
 
@@ -82,66 +129,20 @@ describe("formatError", () => {
     expect(out).toMatch(/mystery/);
   });
 
+  it("suggests -v for non-verbose unknown errors", () => {
+    const out = formatError(new Error("mystery"), { verbose: false });
+    expect(out).toMatch(/Run with -v/);
+  });
+
+  it("does NOT suggest -v when the user is already verbose", () => {
+    const out = formatError(new Error("mystery"), { verbose: true });
+    expect(out).not.toMatch(/Run with -v/);
+  });
+
   it("handles non-Error throwables", () => {
     const out = formatError("a string was thrown", { verbose: false });
     expect(out).toMatch(/unexpected error/i);
     expect(out).toMatch(/a string was thrown/);
-  });
-});
-
-describe("categorizeError", () => {
-  it("returns auth for 401 and 403", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 401 })).category).toBe("auth");
-    expect(categorizeError(new HttpApiError("x", { status: 403 })).category).toBe("auth");
-  });
-
-  it("returns rate-limit for 429", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 429 })).category).toBe("rate-limit");
-  });
-
-  it("returns bad-request for 400", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 400 })).category).toBe("bad-request");
-  });
-
-  it("returns server for 5xx", () => {
-    expect(categorizeError(new HttpApiError("x", { status: 500 })).category).toBe("server");
-    expect(categorizeError(new HttpApiError("x", { status: 503 })).category).toBe("server");
-  });
-
-  it("returns timeout for TimeoutError, AbortError, and 408", () => {
-    expect(categorizeError(new TimeoutError("t")).category).toBe("timeout");
-    const abort = new Error("a");
-    abort.name = "AbortError";
-    expect(categorizeError(abort).category).toBe("timeout");
-    expect(categorizeError(new HttpApiError("x", { status: 408 })).category).toBe("timeout");
-  });
-
-  it("returns network for TypeError and NetworkError", () => {
-    expect(categorizeError(new TypeError("ECONNREFUSED")).category).toBe("network");
-    expect(categorizeError(new NetworkError("n")).category).toBe("network");
-  });
-
-  it("returns unknown for everything else", () => {
-    expect(categorizeError(new Error("weird")).category).toBe("unknown");
-    expect(categorizeError("string error").category).toBe("unknown");
-  });
-
-  it("every categorization carries non-empty suggestions", () => {
-    const cases: unknown[] = [
-      new HttpApiError("x", { status: 401 }),
-      new HttpApiError("x", { status: 429 }),
-      new HttpApiError("x", { status: 400 }),
-      new HttpApiError("x", { status: 500 }),
-      new HttpApiError("x", { status: 408 }),
-      new TimeoutError("t"),
-      new TypeError("e"),
-      new Error("e"),
-      "string",
-    ];
-    for (const c of cases) {
-      const { suggestions } = categorizeError(c);
-      expect(suggestions.length).toBeGreaterThan(0);
-    }
   });
 });
 
