@@ -1,8 +1,10 @@
 import { createRequire } from "node:module";
+import { createInterface } from "node:readline";
 import { Command } from "commander";
 import { buildMessages, callWithRetry, parseCommitMessage } from "./api.js";
+import { AbortError, AicommitError, ConfigError, formatError, ValidationError } from "./errors.js";
 import { executeCommit, getStagedDiff } from "./git.js";
-import { log, logError, logVerbose, setVerbose } from "./logger.js";
+import { getVerbose, log, logError, logVerbose, reset, setVerbose } from "./logger.js";
 
 /** Parsed CLI options (subset of commander's parsed result). */
 export interface CliOptions {
@@ -13,33 +15,83 @@ export interface CliOptions {
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
 
+/** Read a required environment variable. Throws ConfigError on miss. */
+function getEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new ConfigError(`${name} is not set`, {
+      suggestions: [`Set it with: export ${name}=<your-key>`],
+    });
+  }
+  return value;
+}
+
+/**
+ * Strip control characters and reject dangerous leading dashes.
+ *
+ * `startsWith("-")` is sufficient — git's `-m` argument only treats a
+ * leading `-` as a flag separator, so post-trim content starting with
+ * `--` is the only path that could be misinterpreted as a flag.
+ */
+export function sanitizeCommitMessage(raw: string): string {
+  const collapsed = raw.replace(/[\r\n]+/g, " ").trim();
+  if (!collapsed) {
+    throw new ValidationError("Commit message is empty after sanitization", {
+      suggestions: ["The model returned an empty message — try again"],
+    });
+  }
+  if (collapsed.startsWith("-")) {
+    throw new ValidationError(
+      "Commit message starts with '-', which would be parsed as a git flag",
+      {
+        suggestions: ["The model returned a malformed commit message — try again"],
+      },
+    );
+  }
+  return collapsed;
+}
+
 /**
  * Ask the user to confirm the proposed commit message. Default is yes;
- * only the literal `n` (case-insensitive) aborts.
+ * only the literal `n` (case-insensitive) aborts. Throws ConfigError in
+ * non-TTY environments (use a future --yes flag for those).
  */
-function confirm(message: string): Promise<void> {
-  return new Promise((resolve) => {
-    process.stdout.write(`\n  ${message}\n\n`);
-    process.stdout.write("Proceed with commit? [Y/n] ");
+export function confirm(message: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (process.stdin.isTTY !== true) {
+      reject(
+        new ConfigError("Non-interactive shell — cannot prompt for confirmation", {
+          suggestions: [
+            "Run interactively in a terminal",
+            "See issue #21 for the planned --yes flag",
+          ],
+        }),
+      );
+      return;
+    }
 
-    const onData = (chunk: Buffer) => {
-      const reply = chunk.toString().trim().toLowerCase();
-      process.stdin.removeListener("data", onData);
-      process.stdin.pause();
-      if (reply === "n") {
-        process.stdout.write("Aborted.\n");
-        process.exit(0);
-      }
-      resolve();
+    process.stdout.write(`\n  ${message}\n\nProceed with commit? [Y/n] `);
+
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const cleanup = () => {
+      rl.close();
     };
 
-    process.stdin.resume();
-    process.stdin.on("data", onData);
+    rl.once("line", (line) => {
+      cleanup();
+      if (line.trim().toLowerCase() === "n") {
+        reject(new AbortError());
+        return;
+      }
+      resolve();
+    });
   });
 }
 
 /** Build and run the commander program. */
 export function run(): void {
+  reset();
+
   const program = new Command();
 
   program
@@ -63,28 +115,26 @@ export function run(): void {
       const diff = getStagedDiff();
 
       log("Generating commit message...");
-      const apiKey = process.env.OPENCODE_API_KEY;
-      if (!apiKey) {
-        logError("Error: OPENCODE_API_KEY environment variable not set");
-        logError("Set it with: export OPENCODE_API_KEY=<your-key>");
-        process.exit(1);
-      }
+      const apiKey = getEnv("OPENCODE_API_KEY");
 
       const messages = buildMessages(hintPrompt, diff);
       const response = await callWithRetry(messages, apiKey);
-      const message = parseCommitMessage(response);
-
-      await confirm(message);
+      const message = sanitizeCommitMessage(parseCommitMessage(response));
 
       if (options.dryRun) {
-        process.stdout.write("Dry run complete.\n");
+        log("Dry run complete. No changes were committed.");
         return;
       }
+
+      await confirm(message);
+      log("Committing...");
       executeCommit(message);
+      log("Done.");
     });
 
   program.parseAsync(process.argv).catch((err) => {
-    logError(`Error: ${err}`);
-    process.exit(1);
+    logError(formatError(err, { verbose: getVerbose() }));
+    const exitCode = err instanceof AicommitError ? err.exitCode : 1;
+    process.exit(exitCode);
   });
 }

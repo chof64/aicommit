@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GitError } from "../src/errors.js";
 import { executeCommit, getStagedDiff } from "../src/git.js";
 
 vi.mock("node:child_process", () => ({
@@ -28,21 +29,47 @@ describe("getStagedDiff", () => {
     );
   });
 
-  it("exits with a helpful message when the diff is empty", () => {
+  it("throws GitError with 'no staged files' suggestion when diff is empty", () => {
     mockedExecFileSync.mockReturnValue("   \n");
-    const exit = vi.spyOn(process, "exit").mockImplementation((() => {
-      throw new Error("exit");
-    }) as never);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      getStagedDiff();
+      throw new Error("expected GitError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(GitError);
+      expect((err as GitError).message).toMatch(/no staged files/i);
+      expect((err as GitError).suggestions[0]).toMatch(/git add/);
+    }
+  });
 
-    expect(() => getStagedDiff()).toThrow("exit");
-    expect(exit).toHaveBeenCalledWith(1);
-    expect(stderr.mock.calls.some((call) => String(call[0]).includes("No staged files"))).toBe(
-      true,
-    );
+  it("throws GitError('not a git repository') when git stderr matches", () => {
+    const fakeErr = Object.assign(new Error("git failed"), {
+      code: undefined,
+      stderr: Buffer.from("fatal: not a git repository (or any of the parent directories): .git"),
+    });
+    mockedExecFileSync.mockImplementation(() => {
+      throw fakeErr;
+    });
+    try {
+      getStagedDiff();
+      throw new Error("expected GitError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(GitError);
+      expect((err as GitError).message).toMatch(/not a git repository/i);
+    }
+  });
 
-    exit.mockRestore();
-    stderr.mockRestore();
+  it("throws GitError('git not installed') on ENOENT", () => {
+    const fakeErr = Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT" });
+    mockedExecFileSync.mockImplementation(() => {
+      throw fakeErr;
+    });
+    try {
+      getStagedDiff();
+      throw new Error("expected GitError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(GitError);
+      expect((err as GitError).message).toMatch(/not installed/i);
+    }
   });
 });
 
@@ -65,25 +92,21 @@ describe("executeCommit", () => {
     );
   });
 
-  it("exits with git's stderr when the commit fails", () => {
+  it("rethrows as GitError when the commit fails", () => {
     const fakeErr = Object.assign(new Error("git failed"), {
       stderr: Buffer.from("nothing to commit"),
     });
     mockedExecFileSync.mockImplementation(() => {
       throw fakeErr;
     });
-    const exit = vi.spyOn(process, "exit").mockImplementation((() => {
-      throw new Error("exit");
-    }) as never);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    expect(() => executeCommit("feat: thing")).toThrow("exit");
-    expect(exit).toHaveBeenCalledWith(1);
-    expect(stderr.mock.calls.some((call) => String(call[0]).includes("nothing to commit"))).toBe(
-      true,
-    );
-
-    exit.mockRestore();
-    stderr.mockRestore();
+    try {
+      executeCommit("feat: thing");
+      throw new Error("expected GitError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(GitError);
+      expect((err as GitError).message).toMatch(/git commit failed/);
+      expect((err as GitError).message).toMatch(/nothing to commit/);
+      expect((err as GitError).cause).toBe(fakeErr);
+    }
   });
 });
