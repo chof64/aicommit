@@ -8,7 +8,13 @@ export function setVerbose(value: boolean): void {
   verbose = value;
 }
 
-export function isVerbose(): boolean {
+/** Reset module state. Call from `run()` so test invocations don't leak the previous call's verbose flag. */
+export function reset(): void {
+  verbose = false;
+}
+
+/** Read the current verbose flag. Used by the central error funnel. */
+export function getVerbose(): boolean {
   return verbose;
 }
 
