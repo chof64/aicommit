@@ -1,6 +1,6 @@
 {
   "name": "@chof64/aicommit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI-powered commit message generator using opencode.ai zen",
   "type": "module",
   "license": "MIT",
