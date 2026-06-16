@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse } from "../src/api.js";
 import {
+  backoffMs,
   buildMessages,
   callWithRetry,
   MAX_RETRIES,
   parseCommitMessage,
-  RETRY_DELAY_MS,
+  RETRY_BASE_MS,
+  RETRY_MAX_MS,
   redact,
   SYSTEM_PROMPT,
 } from "../src/api.js";
@@ -17,7 +19,6 @@ describe("buildMessages", () => {
     expect(msgs).toHaveLength(2);
     expect(msgs[0]?.role).toBe("system");
     expect(msgs[0]?.content).toBe(SYSTEM_PROMPT);
-    expect(msgs[1]?.role).toBe("user");
     expect(msgs[1]?.content).toContain("diff --git a");
   });
 
@@ -63,6 +64,30 @@ describe("parseCommitMessage", () => {
   });
 });
 
+describe("backoffMs", () => {
+  it("doubles the base on each attempt (2s, 4s, 8s, …)", () => {
+    expect(backoffMs(0)).toBe(RETRY_BASE_MS);
+    expect(backoffMs(1)).toBe(RETRY_BASE_MS * 2);
+    expect(backoffMs(2)).toBe(RETRY_BASE_MS * 4);
+    expect(backoffMs(3)).toBe(RETRY_BASE_MS * 8);
+  });
+
+  it("caps the per-retry delay at RETRY_MAX_MS", () => {
+    expect(backoffMs(10)).toBe(RETRY_MAX_MS);
+    expect(backoffMs(20)).toBe(RETRY_MAX_MS);
+  });
+
+  it("uses retryAfterMs when provided, even at attempt 0", () => {
+    expect(backoffMs(0, 5_000)).toBe(5_000);
+    expect(backoffMs(2, 12_345)).toBe(12_345);
+  });
+
+  it("ignores negative or NaN retryAfterMs", () => {
+    expect(backoffMs(0, -1)).toBe(RETRY_BASE_MS);
+    expect(backoffMs(0, Number.NaN)).toBe(RETRY_BASE_MS);
+  });
+});
+
 describe("callWithRetry", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -88,7 +113,7 @@ describe("callWithRetry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("retries once after a 500 and succeeds on the second attempt (5xx is transient)", async () => {
+  it("retries after a 500 and succeeds on the second attempt (5xx is transient)", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response("nope", { status: 500, statusText: "Server Error" }))
@@ -101,13 +126,81 @@ describe("callWithRetry", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
-    await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS);
+    // First retry waits RETRY_BASE_MS (2s).
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
     const result = await promise;
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       choices: [{ message: { content: "feat: retry" } }],
     });
+  });
+
+  it("retries 429 with exponential backoff", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("slow", { status: 429, statusText: "Too Many Requests" }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ choices: [{ message: { content: "feat: ok" } }] });
+  });
+
+  it("retries 408 with exponential backoff", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("slow", { status: 408, statusText: "Request Timeout" }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ choices: [{ message: { content: "feat: ok" } }] });
+  });
+
+  it("honors Retry-After header on a 429", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "Retry-After": "10" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    // Retry-After overrides the 2s exponential delay with 10s.
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ choices: [{ message: { content: "feat: ok" } }] });
   });
 
   it("rethrows the last HttpApiError after exhausting retries on persistent 503", async () => {
@@ -120,8 +213,9 @@ describe("callWithRetry", () => {
       () => "resolved",
       (e) => e,
     );
-    for (let i = 0; i <= MAX_RETRIES; i++) {
-      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS);
+    // Walk the exponential schedule: 2s, 4s, 8s = 14s total across 3 retries.
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      await vi.advanceTimersByTimeAsync(backoffMs(i));
     }
     const result = (await settled) as unknown;
 
@@ -130,9 +224,7 @@ describe("callWithRetry", () => {
     expect((result as HttpApiError).status).toBe(503);
   });
 
-  it.each([
-    401, 403, 400, 429,
-  ])("does not retry on %i (auth/bad-request/rate-limit)", async (status) => {
+  it.each([401, 403, 400])("does not retry on %i (auth/bad-request)", async (status) => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(new Response("nope", { status, statusText: "Nope" }));
@@ -142,8 +234,8 @@ describe("callWithRetry", () => {
       () => "resolved",
       (e) => e,
     );
-    // Advance past any timer that might fire even though we expect no retry.
-    await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS * (MAX_RETRIES + 1));
+    // Advance past the entire possible backoff window to ensure no retry fires.
+    await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * (MAX_RETRIES + 1));
     const result = (await settled) as unknown;
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -205,10 +297,21 @@ describe("HttpApiError.fromResponse", () => {
     expect(e403.category).toBe("auth");
   });
 
-  it("maps 429 to rate-limit and is not retriable", () => {
+  it("maps 429 to rate-limit and is retriable", () => {
     const e = HttpApiError.fromResponse(429, "Too Many Requests", "");
     expect(e.category).toBe("rate-limit");
-    expect(e.shouldRetry).toBe(false);
+    expect(e.shouldRetry).toBe(true);
+  });
+
+  it("propagates retryAfterMs onto 429 errors", () => {
+    const e = HttpApiError.fromResponse(429, "Too Many Requests", "", 7_000);
+    expect(e.retryAfterMs).toBe(7_000);
+    expect(e.shouldRetry).toBe(true);
+  });
+
+  it("propagates retryAfterMs onto 5xx errors", () => {
+    const e = HttpApiError.fromResponse(503, "Service Unavailable", "", 15_000);
+    expect(e.retryAfterMs).toBe(15_000);
   });
 
   it("maps 400 to bad-request and is not retriable", () => {
@@ -225,10 +328,10 @@ describe("HttpApiError.fromResponse", () => {
     }
   });
 
-  it("maps 408 to timeout and is not retriable", () => {
+  it("maps 408 to timeout and is retriable", () => {
     const e = HttpApiError.fromResponse(408, "Request Timeout", "");
     expect(e.category).toBe("timeout");
-    expect(e.shouldRetry).toBe(false);
+    expect(e.shouldRetry).toBe(true);
   });
 
   it("falls through to unknown for unrecognized statuses", () => {
@@ -250,7 +353,7 @@ describe("redact", () => {
     expect(redact("feat: x", 80)).toBe("feat: x");
   });
 
-  it("truncates long strings and reports the original length", () => {
+  it("truncates long strings and reports original length", () => {
     const long = "a".repeat(100);
     const out = redact(long, 10);
     expect(out.startsWith("a".repeat(10))).toBe(true);

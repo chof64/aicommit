@@ -111,6 +111,9 @@ export class ValidationError extends AicommitError {
 
 /** Non-2xx response from the upstream API. Use {@link HttpApiError.fromResponse}. */
 export class HttpApiError extends AicommitError {
+  /** Server-suggested wait, parsed from a `Retry-After` header. Drives backoff when set. */
+  public readonly retryAfterMs?: number;
+
   constructor(
     message: string,
     opts: {
@@ -119,17 +122,25 @@ export class HttpApiError extends AicommitError {
       suggestions?: string[];
       category?: ErrorCategory;
       shouldRetry?: boolean;
+      retryAfterMs?: number;
     },
   ) {
     super(message, "api", opts.category ?? "unknown", opts);
+    this.retryAfterMs = opts.retryAfterMs;
   }
 
   /**
    * Build the right HttpApiError for a given response status, with the
    * correct category, retry policy, and suggestions attached at the
    * moment we know the status. Body is read for a short error snippet.
+   * `retryAfterMs` comes from the response's `Retry-After` header.
    */
-  static fromResponse(status: number, statusText: string, bodySnippet: string): HttpApiError {
+  static fromResponse(
+    status: number,
+    statusText: string,
+    bodySnippet: string,
+    retryAfterMs?: number,
+  ): HttpApiError {
     const detail = bodySnippet
       ? `HTTP ${status} ${statusText}: ${bodySnippet}`
       : `HTTP ${status} ${statusText}`;
@@ -145,6 +156,8 @@ export class HttpApiError extends AicommitError {
       return new HttpApiError(detail, {
         status,
         category: "rate-limit",
+        shouldRetry: true,
+        retryAfterMs,
         suggestions: ["Wait and retry later", "Check your API quota"],
       });
     }
@@ -159,6 +172,7 @@ export class HttpApiError extends AicommitError {
       return new HttpApiError(detail, {
         status,
         category: "timeout",
+        shouldRetry: true,
         suggestions: ["Check your network"],
       });
     }
@@ -167,6 +181,7 @@ export class HttpApiError extends AicommitError {
         status,
         category: "server",
         shouldRetry: true,
+        retryAfterMs,
         suggestions: ["The API is having issues — try again shortly"],
       });
     }

@@ -18,8 +18,12 @@ export interface ApiResponse {
 export const ENDPOINT = "https://opencode.ai/zen/v1/chat/completions";
 export const MODEL = "big-pickle";
 export const TIMEOUT_MS = 60_000;
-export const RETRY_DELAY_MS = 3_000;
-export const MAX_RETRIES = 1;
+
+/** Total retry budget: 1 initial attempt + MAX_RETRIES retries. */
+export const MAX_RETRIES = 3;
+/** First retry waits this long; each subsequent retry doubles, capped at RETRY_MAX_MS. */
+export const RETRY_BASE_MS = 2_000;
+export const RETRY_MAX_MS = 30_000;
 
 /** System prompt that frames the model as a commit-message generator. */
 export const SYSTEM_PROMPT =
@@ -48,6 +52,27 @@ export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
 export function redact(text: string, max = 80): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max)}… (${text.length} chars)`;
+}
+
+/**
+ * Compute the delay before the next retry. `attempt` is 0-based:
+ * attempt 0 → RETRY_BASE_MS, attempt 1 → RETRY_BASE_MS*2, etc., capped at
+ * RETRY_MAX_MS. If `retryAfterMs` is set (parsed from a `Retry-After`
+ * header), it overrides the computed value.
+ */
+export function backoffMs(attempt: number, retryAfterMs?: number): number {
+  if (retryAfterMs !== undefined && retryAfterMs >= 0) return retryAfterMs;
+  return Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
+}
+
+/** Parse a `Retry-After` header. Returns ms, or undefined if absent/unparseable. */
+function parseRetryAfter(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  // HTTP-date form: rare, skip with a verbose log. The user can extend if needed.
+  logVerbose(`Ignoring non-numeric Retry-After header: ${value}`);
+  return undefined;
 }
 
 /** One raw API call. Throws typed errors; never calls process.exit. */
@@ -83,7 +108,13 @@ async function callOnce(
     } catch {
       // Body read failed; statusText is enough.
     }
-    throw HttpApiError.fromResponse(response.status, response.statusText, bodySnippet);
+    const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
+    throw HttpApiError.fromResponse(
+      response.status,
+      response.statusText,
+      bodySnippet,
+      retryAfterMs,
+    );
   }
 
   try {
@@ -110,33 +141,25 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
     } catch (err) {
       clearTimeout(timer);
       lastError = err;
-      const category =
-        err instanceof TimeoutError || (err instanceof Error && err.name === "AbortError")
-          ? "timeout"
-          : err instanceof Error && "category" in err
-            ? ((err as { category?: string }).category ?? "unknown")
-            : "unknown";
+      const category = (err as { category?: string }).category ?? "unknown";
       logVerbose(
         `Retry attempt ${attempt + 1}/${MAX_RETRIES + 1} failed (${category}): ${err instanceof Error ? err.message : String(err)}`,
       );
 
-      // Decide retry purely from the error itself. The `shouldRetry` flag
-      // is set by the error's own constructor — for the API path that
-      // means `fromResponse` (transient 5xx only) and `NetworkError`.
+      // Decide retry purely from the error itself. `shouldRetry` is set by
+      // the error's own constructor — currently: 429, 408, 5xx, NetworkError.
       const retriable =
         err instanceof NetworkError ||
         (err instanceof HttpApiError && err.shouldRetry) ||
-        // Raw AbortError never made it through to callOnce's catch — but
-        // be defensive: if it surfaces here, treat as a one-shot timeout.
-        (err instanceof Error && err.name === "AbortError" && attempt < MAX_RETRIES);
+        (err instanceof Error && err.name === "AbortError");
       if (!retriable) throw err;
+      if (attempt >= MAX_RETRIES) break;
 
-      if (attempt < MAX_RETRIES) {
-        logWarning(
-          `API request failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}, ${category}), retrying in ${RETRY_DELAY_MS / 1000}s...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-      }
+      const delay = backoffMs(attempt, err instanceof HttpApiError ? err.retryAfterMs : undefined);
+      logWarning(
+        `API request failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}, ${category}), retrying in ${Math.round(delay / 1000)}s...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 
