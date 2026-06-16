@@ -24,6 +24,8 @@ export const MAX_RETRIES = 3;
 /** First retry waits this long; each subsequent retry doubles, capped at RETRY_MAX_MS. */
 export const RETRY_BASE_MS = 2_000;
 export const RETRY_MAX_MS = 30_000;
+/** Hard cap on cumulative wait time across all retries. Clamps per-retry delays that would push us over. */
+export const MAX_TOTAL_WAIT_MS = 30_000;
 
 /** System prompt that frames the model as a commit-message generator. */
 export const SYSTEM_PROMPT =
@@ -33,6 +35,7 @@ export const SYSTEM_PROMPT =
 export const USER_PROMPT_TAIL =
   "Given these staged changes, output ONLY the commit message in conventional commit format (<type>: <description>). No explanation, no markdown, no code blocks.";
 
+// FIXME: impersonates Chrome. Tracked in #30.
 export const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -127,6 +130,7 @@ async function callOnce(
 /** Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories. */
 export async function callWithRetry(messages: ChatMessage[], apiKey: string): Promise<ApiResponse> {
   let lastError: unknown;
+  let elapsedWait = 0;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -155,11 +159,20 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
       if (!retriable) throw err;
       if (attempt >= MAX_RETRIES) break;
 
-      const delay = backoffMs(attempt, err instanceof HttpApiError ? err.retryAfterMs : undefined);
+      // Clamp the per-retry delay to whatever fits in the remaining total-wait budget.
+      const requested = backoffMs(
+        attempt,
+        err instanceof HttpApiError ? err.retryAfterMs : undefined,
+      );
+      const remaining = MAX_TOTAL_WAIT_MS - elapsedWait;
+      const delay = Math.min(requested, Math.max(remaining, 0));
+      if (delay <= 0) break;
+
       logWarning(
         `API request failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}, ${category}), retrying in ${Math.round(delay / 1000)}s...`,
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
+      elapsedWait += delay;
     }
   }
 

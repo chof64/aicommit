@@ -24,6 +24,8 @@ export function getStagedDiff(): string {
       stderr.includes("not a git repository") ||
       (stderr.includes("unknown option") && stderr.includes("cached"));
     if (notAGitRepo) {
+      const firstStderrLine = stderr.trim().split("\n")[0] ?? "";
+      logVerbose(`Detected "not a git repository" via stderr: ${firstStderrLine}`);
       throw new GitError("Not a git repository — run from inside a repo", { cause: err });
     }
     throw new GitError(`git diff failed: ${stderr.trim() || String(err)}`, { cause: err });

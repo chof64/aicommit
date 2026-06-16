@@ -26,8 +26,14 @@ function getEnv(name: string): string {
   return value;
 }
 
-/** Strip control characters and reject dangerous leading dashes. */
-function sanitizeCommitMessage(raw: string): string {
+/**
+ * Strip control characters and reject dangerous leading dashes.
+ *
+ * `startsWith("-")` is sufficient — git's `-m` argument only treats a
+ * leading `-` as a flag separator, so post-trim content starting with
+ * `--` is the only path that could be misinterpreted as a flag.
+ */
+export function sanitizeCommitMessage(raw: string): string {
   const collapsed = raw.replace(/[\r\n]+/g, " ").trim();
   if (!collapsed) {
     throw new ValidationError("Commit message is empty after sanitization", {
@@ -50,7 +56,7 @@ function sanitizeCommitMessage(raw: string): string {
  * only the literal `n` (case-insensitive) aborts. Throws ConfigError in
  * non-TTY environments (use a future --yes flag for those).
  */
-function confirm(message: string): Promise<void> {
+export function confirm(message: string): Promise<void> {
   return new Promise((resolve, reject) => {
     if (process.stdin.isTTY !== true) {
       reject(

@@ -69,7 +69,7 @@ describe("error hierarchy", () => {
   it("AbortError exits EX_ABORT and defaults its message", () => {
     const e = new AbortError();
     expect(e.exitCode).toBe(ExitCode.EX_ABORT);
-    expect(e.message).toBe("Aborted.");
+    expect(e.message).toBe("Aborted by user");
     expect(e.shouldRetry).toBe(false);
   });
 

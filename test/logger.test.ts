@@ -32,4 +32,20 @@ describe("logger", () => {
     reset();
     expect(getVerbose()).toBe(false);
   });
+
+  it("reset() suppresses subsequent writes even after a previous verbose write", () => {
+    setVerbose(true);
+    const firstSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    logVerbose("before reset");
+    const callsAfterFirstWrite = firstSpy.mock.calls.length;
+    expect(callsAfterFirstWrite).toBeGreaterThan(0);
+
+    reset();
+
+    // New spy is aliased to the same underlying mock. Clear the call log so
+    // we only count writes that happened *after* reset.
+    firstSpy.mockClear();
+    logVerbose("after reset");
+    expect(firstSpy).not.toHaveBeenCalled();
+  });
 });

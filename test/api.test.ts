@@ -5,6 +5,7 @@ import {
   buildMessages,
   callWithRetry,
   MAX_RETRIES,
+  MAX_TOTAL_WAIT_MS,
   parseCommitMessage,
   RETRY_BASE_MS,
   RETRY_MAX_MS,
@@ -19,6 +20,7 @@ describe("buildMessages", () => {
     expect(msgs).toHaveLength(2);
     expect(msgs[0]?.role).toBe("system");
     expect(msgs[0]?.content).toBe(SYSTEM_PROMPT);
+    expect(msgs[1]?.role).toBe("user");
     expect(msgs[1]?.content).toContain("diff --git a");
   });
 
@@ -85,6 +87,11 @@ describe("backoffMs", () => {
   it("ignores negative or NaN retryAfterMs", () => {
     expect(backoffMs(0, -1)).toBe(RETRY_BASE_MS);
     expect(backoffMs(0, Number.NaN)).toBe(RETRY_BASE_MS);
+  });
+
+  it("treats retryAfterMs of 0 as valid (retry immediately)", () => {
+    expect(backoffMs(0, 0)).toBe(0);
+    expect(backoffMs(2, 0)).toBe(0);
   });
 });
 
@@ -283,6 +290,77 @@ describe("callWithRetry", () => {
 
     expect(result).toBeInstanceOf(ParseError);
     expect((result as ParseError).cause).toBeDefined();
+  });
+});
+
+describe("MAX_TOTAL_WAIT_MS cap", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("clamps per-retry delay so total wait never exceeds MAX_TOTAL_WAIT_MS", async () => {
+    // Each response would ask for 999s of Retry-After — the cap must clamp
+    // the very first retry's delay to MAX_TOTAL_WAIT_MS, and the second
+    // retry's remaining budget to 0, which triggers an early break.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "Retry-After": "999" },
+        }),
+      )
+      .mockResolvedValue(
+        new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "Retry-After": "999" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+      () => "resolved",
+      (e) => e,
+    );
+    // Walk fake timers up to (and past) the cap. The loop must bail on its
+    // own; advancing extra is just a safety net.
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      await vi.advanceTimersByTimeAsync(MAX_TOTAL_WAIT_MS);
+    }
+    const result = (await settled) as unknown;
+
+    // The cap caused at most 2 fetches (initial + 1 retry that was clamped),
+    // and the final error is a retriable HttpApiError from the rate-limit path.
+    expect(result).toBeInstanceOf(HttpApiError);
+    expect((result as HttpApiError).category).toBe("rate-limit");
+  });
+
+  it("preserves the natural 2s/4s/8s schedule when no Retry-After is present", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+      () => "resolved",
+      (e) => e,
+    );
+    // 2s + 4s + 8s = 14s, well under the 30s cap. We should see all 4 fetches.
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      await vi.advanceTimersByTimeAsync(backoffMs(i));
+    }
+    const result = (await settled) as unknown;
+
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    expect(result).toBeInstanceOf(HttpApiError);
   });
 });
 

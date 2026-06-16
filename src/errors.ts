@@ -221,7 +221,7 @@ export class ParseError extends AicommitError {
 
 /** User declined the proposed commit (answered "n" at the prompt). */
 export class AbortError extends AicommitError {
-  constructor(message = "Aborted.") {
+  constructor(message = "Aborted by user") {
     super(message, "abort", "abort", { exitCode: ExitCode.EX_ABORT });
   }
 }
@@ -250,9 +250,9 @@ export function formatError(err: unknown, opts: ErrorFormatOptions = {}): string
   }
 
   const cause = err instanceof Error ? err.message : String(err);
-  const parts: string[] = ["Error: unexpected error", cause];
+  const parts: string[] = [`Error: unexpected error: ${cause}`];
   if (verbose && err instanceof Error && err.stack) {
-    parts.push(err.stack.split("\n").slice(0, 3).join("\n"));
+    parts.push(`Cause: ${err.stack.split("\n").slice(0, 3).join("\n")}`);
   } else if (!verbose) {
     parts.push("→ Run with -v for details");
   }
