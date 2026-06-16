@@ -1,5 +1,7 @@
 # @chof64/aicommit
 
+[![CI](https://github.com/chof64/aicommit/actions/workflows/ci.yml/badge.svg)](https://github.com/chof64/aicommit/actions/workflows/ci.yml)
+
 AI-powered commit message generator. Reads your staged `git diff`, sends it
 to the [opencode.ai zen](https://opencode.ai) chat completions API, and
 writes a conventional-commit message after a quick confirmation prompt.
