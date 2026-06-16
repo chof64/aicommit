@@ -4,7 +4,8 @@
       "release-type": "node",
       "package-name": "@chof64/aicommit",
       "changelog-path": "CHANGELOG.md",
-      "versioning": "default"
+      "versioning": "default",
+      "prerelease": false
     }
   }
 }
