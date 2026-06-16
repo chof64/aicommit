@@ -8,14 +8,22 @@ export function getStagedDiff(): string {
 
   let raw: string;
   try {
-    raw = execFileSync("git", ["diff", "--cached"], { encoding: "utf-8" });
+    raw = execFileSync("git", ["diff", "--cached"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stderr?: Buffer | string };
     if (e.code === "ENOENT") {
       throw new GitError("git is not installed or not on PATH", { cause: err });
     }
     const stderr = e.stderr?.toString() ?? "";
-    if (stderr.includes("not a git repository")) {
+    // Two ways "not a git repository" surfaces: literal stderr, or the
+    // implicit no-index mode rejecting --cached (Apple/system git).
+    const notAGitRepo =
+      stderr.includes("not a git repository") ||
+      (stderr.includes("unknown option") && stderr.includes("cached"));
+    if (notAGitRepo) {
       throw new GitError("Not a git repository — run from inside a repo", { cause: err });
     }
     throw new GitError(`git diff failed: ${stderr.trim() || String(err)}`, { cause: err });
