@@ -112,7 +112,7 @@ export function run(): void {
       if (options.dryRun) logVerbose("Dry-run mode enabled");
 
       log("Checking for staged changes...");
-      const diff = getStagedDiff();
+      const diff = await getStagedDiff();
 
       log("Generating commit message...");
       const apiKey = getEnv("OPENCODE_API_KEY");
