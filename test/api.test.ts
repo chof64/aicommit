@@ -18,9 +18,7 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "../src/pkg.js";
 
 describe("USER_AGENT", () => {
   it("identifies the npm package and version", () => {
-    expect(USER_AGENT).toBe(
-      `${PACKAGE_NAME}/${PACKAGE_VERSION} (https://github.com/chof64/aicommit)`,
-    );
+    expect(USER_AGENT).toBe(`${PACKAGE_NAME}/${PACKAGE_VERSION}`);
     expect(PACKAGE_NAME).toBe("@chof64/aicommit");
   });
 });

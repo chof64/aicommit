@@ -43,7 +43,7 @@ export const SYSTEM_PROMPT =
 export const USER_PROMPT_TAIL =
   "Given these staged changes, output ONLY the commit message in conventional commit format (<type>: <description>). No explanation, no markdown, no code blocks.";
 
-export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION} (https://github.com/chof64/aicommit)`;
+export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION}`;
 
 /** Build the system+user message pair for the chat-completions API. */
 export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
