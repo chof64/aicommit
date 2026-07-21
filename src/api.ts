@@ -1,11 +1,8 @@
-import { createRequire } from "node:module";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
-
-const require = createRequire(import.meta.url);
-const pkg = require("../package.json") as { version: string };
+import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
 
 /** A single chat message in the OpenAI-compatible API format. */
 export interface ChatMessage {
@@ -46,7 +43,7 @@ export const SYSTEM_PROMPT =
 export const USER_PROMPT_TAIL =
   "Given these staged changes, output ONLY the commit message in conventional commit format (<type>: <description>). No explanation, no markdown, no code blocks.";
 
-export const USER_AGENT = `aicommit/${pkg.version} (https://github.com/chof64/aicommit)`;
+export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION} (https://github.com/chof64/aicommit)`;
 
 /** Build the system+user message pair for the chat-completions API. */
 export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
