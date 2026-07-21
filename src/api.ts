@@ -1,7 +1,11 @@
+import { createRequire } from "node:module";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 
 /** A single chat message in the OpenAI-compatible API format. */
 export interface ChatMessage {
@@ -42,9 +46,7 @@ export const SYSTEM_PROMPT =
 export const USER_PROMPT_TAIL =
   "Given these staged changes, output ONLY the commit message in conventional commit format (<type>: <description>). No explanation, no markdown, no code blocks.";
 
-// FIXME: impersonates Chrome. Tracked in #30.
-export const USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+export const USER_AGENT = `aicommit/${pkg.version} (https://github.com/chof64/aicommit)`;
 
 /** Build the system+user message pair for the chat-completions API. */
 export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
@@ -115,7 +117,6 @@ function mapSdkError(err: unknown): never {
  * - Prefer `generateText({ maxRetries, timeout })` over our custom retry loop
  * - Drop the `ApiResponse` shim and return text directly from `callWithRetry`
  * - Use `system` + `prompt` instead of hand-built message arrays
- * - Drop Chrome User-Agent impersonation once #30 is resolved
  */
 async function callOnce(
   messages: ChatMessage[],
