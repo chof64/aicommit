@@ -57,14 +57,15 @@ You will always be asked to confirm before `git commit` runs. Press `n` (or
 ## How it works
 
 1. Runs `git diff --cached` and aborts if nothing is staged.
-2. Sends the diff (plus any hint) to
-   `https://opencode.ai/zen/v1/chat/completions` with model `big-pickle`.
+2. Sends the diff (plus any hint) to the opencode.ai zen chat-completions
+   API (`big-pickle`) via the [Vercel AI SDK](https://ai-sdk.dev)
+   (`@ai-sdk/openai-compatible`).
 3. Asks the LLM for a single conventional-commit message
    (`<type>: <description>`).
 4. Shows you the result, waits for `Y/n`, then runs `git commit -m`.
 
 The full prompt sent to the model is in
-[`src/config.ts`](./src/config.ts) — see `SYSTEM_PROMPT` and `USER_PROMPT_TAIL`.
+[`src/api.ts`](./src/api.ts) — see `SYSTEM_PROMPT` and `USER_PROMPT_TAIL`.
 
 ## About
 

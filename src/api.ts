@@ -1,5 +1,8 @@
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { APICallError, generateText } from "ai";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
+import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
 
 /** A single chat message in the OpenAI-compatible API format. */
 export interface ChatMessage {
@@ -14,8 +17,13 @@ export interface ApiResponse {
   }>;
 }
 
-/** Endpoint and timing constants for the opencode.ai zen API. */
-export const ENDPOINT = "https://opencode.ai/zen/v1/chat/completions";
+/**
+ * OpenAI-compatible base URL for opencode.ai zen.
+ * Chat completions are served at `${BASE_URL}/chat/completions`.
+ */
+export const BASE_URL = "https://opencode.ai/zen/v1";
+/** Full chat-completions endpoint (kept for docs/compat; AI SDK uses {@link BASE_URL}). */
+export const ENDPOINT = `${BASE_URL}/chat/completions`;
 export const MODEL = "big-pickle";
 export const TIMEOUT_MS = 60_000;
 
@@ -35,9 +43,7 @@ export const SYSTEM_PROMPT =
 export const USER_PROMPT_TAIL =
   "Given these staged changes, output ONLY the commit message in conventional commit format (<type>: <description>). No explanation, no markdown, no code blocks.";
 
-// FIXME: impersonates Chrome. Tracked in #30.
-export const USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION}`;
 
 /** Build the system+user message pair for the chat-completions API. */
 export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
@@ -69,8 +75,8 @@ export function backoffMs(attempt: number, retryAfterMs?: number): number {
 }
 
 /** Parse a `Retry-After` header. Returns ms, or undefined if absent/unparseable. */
-function parseRetryAfter(value: string | null): number | undefined {
-  if (value === null) return undefined;
+function parseRetryAfter(value: string | null | undefined): number | undefined {
+  if (value === null || value === undefined) return undefined;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
   // HTTP-date form: rare, skip with a verbose log. The user can extend if needed.
@@ -78,52 +84,60 @@ function parseRetryAfter(value: string | null): number | undefined {
   return undefined;
 }
 
-/** One raw API call. Throws typed errors; never calls process.exit. */
+/** Map an AI SDK / transport failure onto our typed error hierarchy. */
+function mapSdkError(err: unknown): never {
+  if (err instanceof Error && err.name === "AbortError") {
+    throw new TimeoutError(`Request timed out after ${TIMEOUT_MS / 1000}s`, { cause: err });
+  }
+
+  if (APICallError.isInstance(err)) {
+    // Successful HTTP status but unparseable body — same as the old response.json() path.
+    if (err.statusCode === 200) {
+      throw new ParseError("Invalid JSON in API response", { cause: err.cause ?? err });
+    }
+
+    const status = err.statusCode ?? 0;
+    const statusText = err.message || "Error";
+    const body = err.responseBody ?? "";
+    const bodySnippet = body.length > 200 ? `${body.slice(0, 200)}…` : body;
+    const retryAfterMs = parseRetryAfter(err.responseHeaders?.["retry-after"]);
+    throw HttpApiError.fromResponse(status, statusText, bodySnippet, retryAfterMs);
+  }
+
+  throw new NetworkError("Network error reaching the API", { cause: err });
+}
+
+/**
+ * One API call via the Vercel AI SDK.
+ *
+ * Follow-ups (hold for a later pass):
+ * - Prefer `generateText({ maxRetries, timeout })` over our custom retry loop
+ * - Drop the `ApiResponse` shim and return text directly from `callWithRetry`
+ * - Use `system` + `prompt` instead of hand-built message arrays
+ */
 async function callOnce(
   messages: ChatMessage[],
   apiKey: string,
   signal: AbortSignal,
 ): Promise<ApiResponse> {
-  let response: Response;
+  const provider = createOpenAICompatible({
+    name: "opencode",
+    baseURL: BASE_URL,
+    apiKey,
+  });
+
   try {
-    response = await fetch(ENDPOINT, {
-      method: "POST",
-      signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
-      },
-      body: JSON.stringify({ model: MODEL, messages, stream: false }),
+    const { text } = await generateText({
+      model: provider.chatModel(MODEL),
+      messages,
+      abortSignal: signal,
+      // Keep our existing retry policy; avoid stacking SDK retries on top.
+      maxRetries: 0,
+      headers: { "User-Agent": USER_AGENT },
     });
+    return { choices: [{ message: { content: text } }] };
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new TimeoutError(`Request timed out after ${TIMEOUT_MS / 1000}s`, { cause: err });
-    }
-    throw new NetworkError("Network error reaching the API", { cause: err });
-  }
-
-  if (!response.ok) {
-    let bodySnippet = "";
-    try {
-      const text = await response.text();
-      bodySnippet = text.length > 200 ? `${text.slice(0, 200)}…` : text;
-    } catch {
-      // Body read failed; statusText is enough.
-    }
-    const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
-    throw HttpApiError.fromResponse(
-      response.status,
-      response.statusText,
-      bodySnippet,
-      retryAfterMs,
-    );
-  }
-
-  try {
-    return (await response.json()) as ApiResponse;
-  } catch (err) {
-    throw new ParseError("Invalid JSON in API response", { cause: err });
+    mapSdkError(err);
   }
 }
 

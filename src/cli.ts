@@ -1,19 +1,16 @@
-import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { Command } from "commander";
 import { buildMessages, callWithRetry, parseCommitMessage } from "./api.js";
 import { AbortError, AicommitError, ConfigError, formatError, ValidationError } from "./errors.js";
 import { executeCommit, getStagedDiff } from "./git.js";
 import { getVerbose, log, logError, logVerbose, reset, setVerbose } from "./logger.js";
+import { PACKAGE_VERSION } from "./pkg.js";
 
 /** Parsed CLI options (subset of commander's parsed result). */
 export interface CliOptions {
   dryRun?: boolean;
   verbose?: boolean;
 }
-
-const require = createRequire(import.meta.url);
-const pkg = require("../package.json") as { version: string };
 
 /** Read a required environment variable. Throws ConfigError on miss. */
 function getEnv(name: string): string {
@@ -97,7 +94,7 @@ export function run(): void {
   program
     .name("aicommit")
     .description("AI-powered commit message generator")
-    .version(pkg.version)
+    .version(PACKAGE_VERSION)
     .option("--dry-run", "generate commit message without committing")
     .option("-v, --verbose", "enable verbose output to stderr")
     .argument("[hint...]", "optional hint/context for the commit message")

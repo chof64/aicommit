@@ -11,8 +11,17 @@ import {
   RETRY_MAX_MS,
   redact,
   SYSTEM_PROMPT,
+  USER_AGENT,
 } from "../src/api.js";
 import { HttpApiError, ParseError, TimeoutError } from "../src/errors.js";
+import { PACKAGE_NAME, PACKAGE_VERSION } from "../src/pkg.js";
+
+describe("USER_AGENT", () => {
+  it("identifies the npm package and version", () => {
+    expect(USER_AGENT).toBe(`${PACKAGE_NAME}/${PACKAGE_VERSION}`);
+    expect(PACKAGE_NAME).toBe("@chof64/aicommit");
+  });
+});
 
 describe("buildMessages", () => {
   it("produces a system message and a user message", () => {

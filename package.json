@@ -31,6 +31,8 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.14",
+    "ai": "^7.0.33",
     "commander": "^15.0.0"
   },
   "devDependencies": {
