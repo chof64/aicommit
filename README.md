@@ -10,7 +10,11 @@ writes a conventional-commit message after a quick confirmation prompt.
 
 - Node.js **20+** (uses native `fetch`)
 - `git` on `PATH`
-- An [opencode.ai](https://opencode.ai) API key exposed as `OPENCODE_API_KEY`
+
+An [opencode.ai](https://opencode.ai) API key is **optional**. The default
+model (`big-pickle`) accepts anonymous requests, so aicommit works out of the
+box without any configuration. Set `OPENCODE_API_KEY` only if you want access
+to paid models, per-workspace settings, or higher rate limits.
 
 ## Install
 
@@ -18,13 +22,16 @@ writes a conventional-commit message after a quick confirmation prompt.
 npm i -g @chof64/aicommit
 ```
 
-## Configure
+## Configure (optional)
 
-Export your opencode.ai API key in your shell rc:
+To authenticate with opencode.ai Zen, export your API key in your shell rc:
 
 ```sh
 export OPENCODE_API_KEY=<your-key>
 ```
+
+Note: during the free-period of Big Pickle, requests may be used to improve
+the model. Avoid sending diffs that contain personal or confidential data.
 
 ## Usage
 

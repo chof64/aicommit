@@ -129,6 +129,25 @@ describe("callWithRetry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("works when apiKey is undefined (keyless mode)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { content: "feat: x" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callWithRetry(
+      [{ role: "user", content: "hi" }],
+      "sample diff",
+      "",
+      undefined,
+    );
+    expect(result.choices[0]?.message.content).toBe("feat: x");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("retries after a 500 and succeeds on the second attempt (5xx is transient)", async () => {
     const fetchMock = vi
       .fn()

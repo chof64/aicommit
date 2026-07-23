@@ -101,14 +101,14 @@ describe("error hierarchy", () => {
 describe("formatError", () => {
   it("renders title, body, and suggestions for AicommitError", () => {
     const out = formatError(
-      new ConfigError("OPENCODE_API_KEY is not set", {
-        suggestions: ["Set it with: export OPENCODE_API_KEY=<value>"],
+      new ConfigError("Non-interactive shell — cannot prompt for confirmation", {
+        suggestions: ["Run interactively in a terminal"],
       }),
       { verbose: false },
     );
     expect(out).toMatch(/Error:/);
-    expect(out).toMatch(/OPENCODE_API_KEY is not set/);
-    expect(out).toMatch(/Set it with: export OPENCODE_API_KEY/);
+    expect(out).toMatch(/Non-interactive shell/);
+    expect(out).toMatch(/→ Run interactively in a terminal/);
   });
 
   it("includes cause details in verbose mode", () => {

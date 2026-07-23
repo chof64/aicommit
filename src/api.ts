@@ -114,29 +114,27 @@ function mapSdkError(err: unknown): never {
  * One API call via the Vercel AI SDK.
  *
  * The system prompt is split off from the `messages` array and passed via
- * the `system` parameter. The AI SDK >= 5 rejects system messages placed in
- * `messages` with `InvalidPromptError`, so we extract the first `system`
- * message here. Anything else (user/assistant turns) stays in `messages`.
+ * the `instructions` parameter. The AI SDK >= 5 rejects system messages
+ * placed in `messages` with `InvalidPromptError`, so we extract the first
+ * `system` message here. Anything else (user/assistant turns) stays in
+ * `messages`.
  */
 async function callOnce(
   messages: ChatMessage[],
-  apiKey: string,
+  apiKey: string | undefined,
   signal: AbortSignal,
 ): Promise<ApiResponse> {
   const provider = createOpenAICompatible({
     name: "opencode",
     baseURL: BASE_URL,
-    apiKey,
+    ...(apiKey ? { apiKey } : {}),
   });
-
-  const systemMsg = messages.find((m) => m.role === "system");
-  const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
   try {
     const { text } = await generateText({
       model: provider.chatModel(MODEL),
-      system: systemMsg?.content,
-      messages: nonSystemMessages,
+      instructions: messages.find((message) => message.role === "system")?.content,
+      messages: messages.filter((message) => message.role !== "system"),
       abortSignal: signal,
       // Keep our existing retry policy; avoid stacking SDK retries on top.
       maxRetries: 0,
@@ -177,13 +175,14 @@ function rebuildMessagesWithDiff(
  *
  * `originalDiff` is passed alongside `messages` so the retry path can
  * re-truncate from the source-of-truth diff rather than a previously
- * truncated version.
+ * truncated version. `apiKey` may be undefined — opencode.ai zen accepts
+ * anonymous requests for `big-pickle`.
  */
 export async function callWithRetry(
   messages: ChatMessage[],
   originalDiff: string,
   hintPrompt: string,
-  apiKey: string,
+  apiKey: string | undefined,
 ): Promise<ApiResponse> {
   let lastError: unknown;
   let elapsedWait = 0;
