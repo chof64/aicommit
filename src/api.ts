@@ -117,19 +117,20 @@ function mapSdkError(err: unknown): never {
  */
 async function callOnce(
   messages: ChatMessage[],
-  apiKey: string,
+  apiKey: string | undefined,
   signal: AbortSignal,
 ): Promise<ApiResponse> {
   const provider = createOpenAICompatible({
     name: "opencode",
     baseURL: BASE_URL,
-    apiKey,
+    ...(apiKey ? { apiKey } : {}),
   });
 
   try {
     const { text } = await generateText({
       model: provider.chatModel(MODEL),
-      messages,
+      instructions: messages.find((message) => message.role === "system")?.content,
+      messages: messages.filter((message) => message.role !== "system"),
       abortSignal: signal,
       // Keep our existing retry policy; avoid stacking SDK retries on top.
       maxRetries: 0,
@@ -142,7 +143,10 @@ async function callOnce(
 }
 
 /** Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories. */
-export async function callWithRetry(messages: ChatMessage[], apiKey: string): Promise<ApiResponse> {
+export async function callWithRetry(
+  messages: ChatMessage[],
+  apiKey: string | undefined,
+): Promise<ApiResponse> {
   let lastError: unknown;
   let elapsedWait = 0;
 

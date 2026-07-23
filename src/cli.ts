@@ -12,17 +12,6 @@ export interface CliOptions {
   verbose?: boolean;
 }
 
-/** Read a required environment variable. Throws ConfigError on miss. */
-function getEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new ConfigError(`${name} is not set`, {
-      suggestions: [`Set it with: export ${name}=<your-key>`],
-    });
-  }
-  return value;
-}
-
 /**
  * Strip control characters and reject dangerous leading dashes.
  *
@@ -112,7 +101,7 @@ export function run(): void {
       const diff = await getStagedDiff();
 
       log("Generating commit message...");
-      const apiKey = getEnv("OPENCODE_API_KEY");
+      const apiKey = process.env.OPENCODE_API_KEY;
 
       const messages = buildMessages(hintPrompt, diff);
       const response = await callWithRetry(messages, apiKey);

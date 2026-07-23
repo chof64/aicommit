@@ -149,7 +149,10 @@ export class HttpApiError extends AicommitError {
       return new HttpApiError(detail, {
         status,
         category: "auth",
-        suggestions: ["Verify OPENCODE_API_KEY"],
+        suggestions: [
+          "If you set OPENCODE_API_KEY, verify it is valid",
+          "Otherwise the upstream may be rate-limiting anonymous requests — try again later",
+        ],
       });
     }
     if (status === 429) {
