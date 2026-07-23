@@ -391,6 +391,49 @@ describe("callWithRetry", () => {
   }, 10_000);
 });
 
+/**
+ * Real-SDK regression: `callOnce` must extract the system message from the
+ * messages array and pass it via the AI SDK's `system` parameter, otherwise
+ * `generateText` throws `InvalidPromptError: System messages are not allowed
+ * in the prompt or messages fields` and the CLI never reaches the network.
+ *
+ * We exercise the real `generateText` by stubbing `fetch` only — no
+ * `vi.mock("ai", …)` — and assert that a happy-path 200 produces a parsed
+ * result instead of an SDK rejection.
+ */
+describe("callWithRetry with real AI SDK", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not throw InvalidPromptError when the messages array contains a system role", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    // buildMessages returns a `system` message + a `user` message. Prior to
+    // extracting the system message in callOnce, the AI SDK would reject this
+    // with InvalidPromptError before any HTTP request was made.
+    const messages = buildMessages("", "diff --git a/foo b/foo\n@@ -0,0 +1 @@\n+hello\n");
+    expect(messages.some((m) => m.role === "system")).toBe(true);
+
+    const result: ApiResponse = await callWithRetry(messages, "the diff", "", "k");
+
+    expect(result.choices[0]?.message.content).toBe("feat: ok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The fetch body must include the user message with the diff.
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    const allContent = JSON.stringify(body.messages.map((m: { content: string }) => m.content));
+    expect(allContent).toContain("diff --git a/foo");
+  });
+});
+
 describe("MAX_TOTAL_WAIT_MS cap", () => {
   beforeEach(() => {
     vi.useFakeTimers();

@@ -113,10 +113,10 @@ function mapSdkError(err: unknown): never {
 /**
  * One API call via the Vercel AI SDK.
  *
- * Follow-ups (hold for a later pass):
- * - Prefer `generateText({ maxRetries, timeout })` over our custom retry loop
- * - Drop the `ApiResponse` shim and return text directly from `callWithRetry`
- * - Use `system` + `prompt` instead of hand-built message arrays
+ * The system prompt is split off from the `messages` array and passed via
+ * the `system` parameter. The AI SDK >= 5 rejects system messages placed in
+ * `messages` with `InvalidPromptError`, so we extract the first `system`
+ * message here. Anything else (user/assistant turns) stays in `messages`.
  */
 async function callOnce(
   messages: ChatMessage[],
@@ -129,10 +129,14 @@ async function callOnce(
     apiKey,
   });
 
+  const systemMsg = messages.find((m) => m.role === "system");
+  const nonSystemMessages = messages.filter((m) => m.role !== "system");
+
   try {
     const { text } = await generateText({
       model: provider.chatModel(MODEL),
-      messages,
+      system: systemMsg?.content,
+      messages: nonSystemMessages,
       abortSignal: signal,
       // Keep our existing retry policy; avoid stacking SDK retries on top.
       maxRetries: 0,
