@@ -1,8 +1,11 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
+import { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff } from "./diff.js";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
+
+export { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff };
 
 /** A single chat message in the OpenAI-compatible API format. */
 export interface ChatMessage {
@@ -141,10 +144,47 @@ async function callOnce(
   }
 }
 
-/** Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories. */
-export async function callWithRetry(messages: ChatMessage[], apiKey: string): Promise<ApiResponse> {
+/**
+ * Rebuild the messages array with a truncated diff in place. Preserves all
+ * leading non-user messages (e.g. `system`) from the input and replaces
+ * the user message with one whose instructions/diff reflect the truncated
+ * diff. The hint prefix and instruction tail are reapplied so the model
+ * sees the same prompt shape, just with a smaller diff.
+ */
+function rebuildMessagesWithDiff(
+  messages: ChatMessage[],
+  hintPrompt: string,
+  truncatedDiff: string,
+): ChatMessage[] {
+  const userContent = `${hintPrompt}${USER_PROMPT_TAIL}\n\n${truncatedDiff}`;
+  // Keep any leading non-user messages (e.g. system prompt) so the model
+  // sees the same role topology. Then append the new user message.
+  const head = messages.filter((m) => m.role !== "user");
+  return [...head, { role: "user", content: userContent }];
+}
+
+/**
+ * Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories.
+ *
+ * On the specific 400 `context_length_exceeded` error, attempts a single
+ * automatic retry with a truncated diff before falling through to the
+ * normal retry policy. This consumes one of the MAX_RETRIES slots but
+ * skips backoff (the failure is deterministic, not transient).
+ *
+ * `originalDiff` is passed alongside `messages` so the retry path can
+ * re-truncate from the source-of-truth diff rather than a previously
+ * truncated version.
+ */
+export async function callWithRetry(
+  messages: ChatMessage[],
+  originalDiff: string,
+  hintPrompt: string,
+  apiKey: string,
+): Promise<ApiResponse> {
   let lastError: unknown;
   let elapsedWait = 0;
+  let truncationAttempted = false;
+  let workingMessages = messages;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -152,7 +192,7 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
 
     try {
       logVerbose("Sending request to API...");
-      const data = await callOnce(messages, apiKey, controller.signal);
+      const data = await callOnce(workingMessages, apiKey, controller.signal);
       clearTimeout(timer);
       logVerbose("Response received, parsing...");
       return data;
@@ -163,6 +203,21 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
       logVerbose(
         `Retry attempt ${attempt + 1}/${MAX_RETRIES + 1} failed (${category}): ${err instanceof Error ? err.message : String(err)}`,
       );
+
+      // Single-shot recovery for context overflow: truncate the diff and
+      // retry immediately. We skip backoff because the failure is
+      // deterministic — waiting won't help. This consumes one of the
+      // remaining MAX_RETRIES slots.
+      if (err instanceof HttpApiError && err.contextExceeded && !truncationAttempted) {
+        truncationAttempted = true;
+        const truncated = truncateDiff(originalDiff);
+        workingMessages = rebuildMessagesWithDiff(workingMessages, hintPrompt, truncated);
+        logVerbose(
+          `Diff exceeds context window; truncated to ${truncated.length} bytes and retrying once`,
+        );
+        logWarning("Diff exceeded model context window; retrying with a truncated diff");
+        continue;
+      }
 
       // Decide retry purely from the error itself. `shouldRetry` is set by
       // the error's own constructor — currently: 429, 408, 5xx, NetworkError.

@@ -113,6 +113,13 @@ export class ValidationError extends AicommitError {
 export class HttpApiError extends AicommitError {
   /** Server-suggested wait, parsed from a `Retry-After` header. Drives backoff when set. */
   public readonly retryAfterMs?: number;
+  /**
+   * True only when status 400 and the body indicates the upstream's
+   * `context_length_exceeded` error code. Used by `callWithRetry` to
+   * trigger a single-shot truncated-diff retry irrespective of the
+   * generic `bad-request` retry policy.
+   */
+  public readonly contextExceeded?: boolean;
 
   constructor(
     message: string,
@@ -123,10 +130,28 @@ export class HttpApiError extends AicommitError {
       category?: ErrorCategory;
       shouldRetry?: boolean;
       retryAfterMs?: number;
+      contextExceeded?: boolean;
     },
   ) {
     super(message, "api", opts.category ?? "unknown", opts);
     this.retryAfterMs = opts.retryAfterMs;
+    this.contextExceeded = opts.contextExceeded;
+  }
+
+  /**
+   * Inspect the body snippet for the upstream's `context_length_exceeded`
+   * marker. The provider returns the raw JSON error envelope inside the
+   * AI SDK's `responseBody`, so a clean `JSON.parse` is enough.
+   * Returns false on any parse failure (graceful degradation).
+   */
+  private static detectContextExceeded(bodySnippet: string): boolean {
+    if (!bodySnippet) return false;
+    try {
+      const parsed = JSON.parse(bodySnippet) as { error?: { code?: unknown } };
+      return parsed?.error?.code === "context_length_exceeded";
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -162,10 +187,17 @@ export class HttpApiError extends AicommitError {
       });
     }
     if (status === 400) {
+      const contextExceeded = HttpApiError.detectContextExceeded(bodySnippet);
       return new HttpApiError(detail, {
         status,
         category: "bad-request",
-        suggestions: ["The API rejected the request — try with a smaller diff"],
+        contextExceeded,
+        suggestions: contextExceeded
+          ? [
+              "The diff is too large for this model's context window",
+              "Split the commit with `git add -p` to stage smaller chunks",
+            ]
+          : ["The API rejected the request — try with a smaller diff"],
       });
     }
     if (status === 408) {
