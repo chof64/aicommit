@@ -104,7 +104,7 @@ export function run(): void {
       const apiKey = process.env.OPENCODE_API_KEY;
 
       const messages = buildMessages(hintPrompt, diff);
-      const response = await callWithRetry(messages, apiKey);
+      const response = await callWithRetry(messages, diff, hintPrompt, apiKey);
       const message = sanitizeCommitMessage(parseCommitMessage(response));
 
       if (options.dryRun) {

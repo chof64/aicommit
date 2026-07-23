@@ -124,7 +124,7 @@ describe("callWithRetry", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await callWithRetry([{ role: "user", content: "hi" }], "k");
+    const result = await callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k");
     expect(result.choices[0]?.message.content).toBe("feat: x");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -138,7 +138,12 @@ describe("callWithRetry", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await callWithRetry([{ role: "user", content: "hi" }], undefined);
+    const result = await callWithRetry(
+      [{ role: "user", content: "hi" }],
+      "sample diff",
+      "",
+      undefined,
+    );
     expect(result.choices[0]?.message.content).toBe("feat: x");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -155,7 +160,9 @@ describe("callWithRetry", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").catch(
+      (e) => e,
+    );
     // First retry waits RETRY_BASE_MS (2s).
     await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
     const result = await promise;
@@ -178,7 +185,9 @@ describe("callWithRetry", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").catch(
+      (e) => e,
+    );
     await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
     const result = await promise;
 
@@ -198,7 +207,9 @@ describe("callWithRetry", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").catch(
+      (e) => e,
+    );
     await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
     const result = await promise;
 
@@ -224,7 +235,9 @@ describe("callWithRetry", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
+    const promise = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").catch(
+      (e) => e,
+    );
     // Retry-After overrides the 2s exponential delay with 10s.
     await vi.advanceTimersByTimeAsync(10_000);
     const result = await promise;
@@ -239,7 +252,7 @@ describe("callWithRetry", () => {
       .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").then(
       () => "resolved",
       (e) => e,
     );
@@ -260,7 +273,7 @@ describe("callWithRetry", () => {
       .mockResolvedValue(new Response("nope", { status, statusText: "Nope" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").then(
       () => "resolved",
       (e) => e,
     );
@@ -286,7 +299,7 @@ describe("callWithRetry", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").then(
       () => "resolved",
       (e) => e,
     );
@@ -307,12 +320,136 @@ describe("callWithRetry", () => {
       .mockResolvedValue(new Response("not-json{{", { status: 200, statusText: "OK" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = (await callWithRetry([{ role: "user", content: "hi" }], "k").catch(
-      (e) => e,
-    )) as unknown;
+    const result = (await callWithRetry(
+      [{ role: "user", content: "hi" }],
+      "sample diff",
+      "",
+      "k",
+    ).catch((e) => e)) as unknown;
 
     expect(result).toBeInstanceOf(ParseError);
     expect((result as ParseError).cause).toBeDefined();
+  });
+
+  it("auto-retries with a truncated diff on context_length_exceeded (no backoff)", async () => {
+    // This test exercises the auto-retry path: a 400 with
+    // `context_length_exceeded` triggers a single-shot truncation retry.
+    // We mock `fetch` to return the 400 first, then a 200.
+    const contextBody = JSON.stringify({
+      error: {
+        message: "Request exceeds the context window of the model",
+        code: "context_length_exceeded",
+      },
+    });
+    const okBody = JSON.stringify({
+      choices: [{ message: { content: "feat: truncated" } }],
+    });
+    let callCount = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      callCount += 1;
+      const isFirst = callCount === 1;
+      return Promise.resolve(
+        new Response(isFirst ? contextBody : okBody, {
+          status: isFirst ? 400 : 200,
+          statusText: isFirst ? "Bad Request" : "OK",
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Build a "diff" larger than the default truncation budget so the
+    // helper actually shrinks it. The original is ~80k chars; the truncated
+    // version should be much smaller.
+    const bigLine = "x".repeat(2000);
+    const bigDiff = `diff --git a/foo b/foo\n@@ -1,5 +1,5 @@\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n`;
+
+    const result = await callWithRetry([{ role: "user", content: "hi" }], bigDiff, "", "k");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ choices: [{ message: { content: "feat: truncated" } }] });
+
+    // The second call's user message should carry a truncated diff. The
+    // diff is well over the default 60k budget, so the truncator should
+    // emit its marker. Sanity-check the resulting length is meaningful.
+    const secondCallInit = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+    const secondCallBody = JSON.parse((secondCallInit?.body as string) ?? "{}");
+    const userMessage = secondCallBody.messages?.find((m: { role: string }) => m.role === "user");
+    expect(userMessage?.content).toContain("diff --git a/foo b/foo");
+    expect(userMessage?.content).toMatch(/omitted|truncated to fit model context window/);
+    // The user message must be smaller than the original raw diff because
+    // the prefix is ~200 bytes and the truncator caps the body at maxBytes.
+    expect(userMessage?.content.length).toBeLessThan(bigDiff.length);
+    // And it must be at least the prefix size — proves the user message
+    // isn't empty.
+    expect(userMessage?.content.length).toBeGreaterThan(200);
+  }, 10_000);
+
+  it("gives up after a single truncated retry that still hits context_length_exceeded", async () => {
+    const contextBody = JSON.stringify({
+      error: { code: "context_length_exceeded" },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(contextBody, { status: 400, statusText: "Bad Request" })),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bigLine = "x".repeat(2000);
+    const bigDiff = `diff --git a/foo b/foo\n@@ -1,5 +1,5 @@\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n${bigLine}\n`;
+    const result = (await callWithRetry([{ role: "user", content: "hi" }], bigDiff, "", "k").catch(
+      (e) => e,
+    )) as unknown;
+
+    // First attempt + 1 truncated retry = 2 fetches; then the second 400
+    // is a non-retriable bad-request, so we throw.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toBeInstanceOf(HttpApiError);
+    expect((result as HttpApiError).contextExceeded).toBe(true);
+  }, 10_000);
+});
+
+/**
+ * Real-SDK regression: `callOnce` must extract the system message from the
+ * messages array and pass it via the AI SDK's `system` parameter, otherwise
+ * `generateText` throws `InvalidPromptError: System messages are not allowed
+ * in the prompt or messages fields` and the CLI never reaches the network.
+ *
+ * We exercise the real `generateText` by stubbing `fetch` only — no
+ * `vi.mock("ai", …)` — and assert that a happy-path 200 produces a parsed
+ * result instead of an SDK rejection.
+ */
+describe("callWithRetry with real AI SDK", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not throw InvalidPromptError when the messages array contains a system role", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    // buildMessages returns a `system` message + a `user` message. Prior to
+    // extracting the system message in callOnce, the AI SDK would reject this
+    // with InvalidPromptError before any HTTP request was made.
+    const messages = buildMessages("", "diff --git a/foo b/foo\n@@ -0,0 +1 @@\n+hello\n");
+    expect(messages.some((m) => m.role === "system")).toBe(true);
+
+    const result: ApiResponse = await callWithRetry(messages, "the diff", "", "k");
+
+    expect(result.choices[0]?.message.content).toBe("feat: ok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The fetch body must include the user message with the diff.
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    const allContent = JSON.stringify(body.messages.map((m: { content: string }) => m.content));
+    expect(allContent).toContain("diff --git a/foo");
   });
 });
 
@@ -349,7 +486,7 @@ describe("MAX_TOTAL_WAIT_MS cap", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").then(
       () => "resolved",
       (e) => e,
     );
@@ -372,7 +509,7 @@ describe("MAX_TOTAL_WAIT_MS cap", () => {
       .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
+    const settled = callWithRetry([{ role: "user", content: "hi" }], "sample diff", "", "k").then(
       () => "resolved",
       (e) => e,
     );
@@ -446,6 +583,39 @@ describe("HttpApiError.fromResponse", () => {
     expect(e.message).toContain("500");
     expect(e.message).toContain("Internal Server Error");
     expect(e.message).toContain("boom");
+  });
+});
+
+describe("HttpApiError.fromResponse context-exceeded detection", () => {
+  it("flags contextExceeded when the body contains code: context_length_exceeded", () => {
+    const body = JSON.stringify({
+      error: {
+        message: "Request exceeds the context window of the model",
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+      },
+    });
+    const e = HttpApiError.fromResponse(400, "Bad Request", body);
+    expect(e.contextExceeded).toBe(true);
+    expect(e.category).toBe("bad-request");
+    expect(e.shouldRetry).toBe(false);
+    expect(e.suggestions.some((s) => /context window/i.test(s))).toBe(true);
+  });
+
+  it("does not flag contextExceeded for other 400 bodies", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", '{"error":{"code":"something_else"}}');
+    expect(e.contextExceeded).toBe(false);
+    expect(e.suggestions.some((s) => /smaller diff/i.test(s))).toBe(true);
+  });
+
+  it("does not flag contextExceeded when the body is not JSON", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", "not-json-at-all");
+    expect(e.contextExceeded).toBe(false);
+  });
+
+  it("does not flag contextExceeded when the body is empty", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", "");
+    expect(e.contextExceeded).toBe(false);
   });
 });
 
