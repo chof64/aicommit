@@ -129,7 +129,8 @@ async function callOnce(
   try {
     const { text } = await generateText({
       model: provider.chatModel(MODEL),
-      messages,
+      instructions: messages.find((message) => message.role === "system")?.content,
+      messages: messages.filter((message) => message.role !== "system"),
       abortSignal: signal,
       // Keep our existing retry policy; avoid stacking SDK retries on top.
       maxRetries: 0,
