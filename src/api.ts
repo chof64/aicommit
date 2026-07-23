@@ -117,13 +117,13 @@ function mapSdkError(err: unknown): never {
  */
 async function callOnce(
   messages: ChatMessage[],
-  apiKey: string,
+  apiKey: string | undefined,
   signal: AbortSignal,
 ): Promise<ApiResponse> {
   const provider = createOpenAICompatible({
     name: "opencode",
     baseURL: BASE_URL,
-    apiKey,
+    ...(apiKey ? { apiKey } : {}),
   });
 
   try {
@@ -143,7 +143,10 @@ async function callOnce(
 }
 
 /** Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories. */
-export async function callWithRetry(messages: ChatMessage[], apiKey: string): Promise<ApiResponse> {
+export async function callWithRetry(
+  messages: ChatMessage[],
+  apiKey: string | undefined,
+): Promise<ApiResponse> {
   let lastError: unknown;
   let elapsedWait = 0;
 
