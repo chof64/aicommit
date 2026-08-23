@@ -34,6 +34,12 @@ function generate(): Promise<string> {
   return generateCommitMessage(CONFIG, "", "the diff");
 }
 
+/** A staged-diff payload well over the default truncation budget (~80k chars). */
+function bigDiff(): string {
+  const bigLine = "x".repeat(2000);
+  return `diff --git a/foo b/foo\n@@ -1,5 +1,5 @@\n${`${bigLine}\n`.repeat(40)}`;
+}
+
 describe("USER_AGENT", () => {
   it("identifies the npm package and version", () => {
     expect(USER_AGENT).toBe(`${PACKAGE_NAME}/${PACKAGE_VERSION}`);
@@ -255,6 +261,73 @@ describe("generateCommitMessage", () => {
     expect(result).toBeInstanceOf(ParseError);
     expect((result as ParseError).cause).toBeDefined();
   });
+
+  it("works without an API key (keyless mode)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse("feat: x"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      generateCommitMessage({ ...CONFIG, apiKey: undefined }, "", "the diff"),
+    ).resolves.toBe("feat: x");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("auto-retries once with a truncated diff on context_length_exceeded", async () => {
+    // A 400 carrying `context_length_exceeded` triggers exactly one
+    // immediate truncation retry — no backoff wait — then succeeds.
+    let callCount = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      callCount += 1;
+      return Promise.resolve(
+        callCount === 1
+          ? new Response(JSON.stringify({ error: { code: "context_length_exceeded" } }), {
+              status: 400,
+              statusText: "Bad Request",
+              headers: { "Content-Type": "application/json" },
+            })
+          : okResponse("feat: truncated"),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await generateCommitMessage(CONFIG, "", bigDiff());
+
+    expect(result).toBe("feat: truncated");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // The second request must carry the truncated diff, not the original.
+    const [, init] = fetchMock.mock.calls[1] as [unknown, { body: string }];
+    const body = JSON.parse(init.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const userMessage = body.messages.find((m) => m.role === "user")?.content ?? "";
+    expect(userMessage).toContain("diff --git a/foo b/foo");
+    expect(userMessage).toMatch(/omitted|truncated to fit model context window/);
+    expect(userMessage.length).toBeLessThan(bigDiff().length);
+    expect(userMessage.length).toBeGreaterThan(200);
+  });
+
+  it("gives up after one truncated retry still fails with context_length_exceeded", async () => {
+    // Fresh Response per call — a Response body can only be read once.
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: { code: "context_length_exceeded" } }), {
+          status: 400,
+          statusText: "Bad Request",
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = (await generateCommitMessage(CONFIG, "", bigDiff()).catch((e) => e)) as unknown;
+
+    // First attempt + single truncated retry; the second 400 is a plain
+    // non-retriable bad-request, so we throw.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toBeInstanceOf(HttpApiError);
+    expect((result as HttpApiError).contextExceeded).toBe(true);
+  });
 });
 
 describe("MAX_TOTAL_WAIT_MS cap", () => {
@@ -407,6 +480,39 @@ describe("HttpApiError.fromResponse", () => {
     expect(e.message).toContain("500");
     expect(e.message).toContain("Internal Server Error");
     expect(e.message).toContain("boom");
+  });
+});
+
+describe("HttpApiError.fromResponse context-exceeded detection", () => {
+  it("flags contextExceeded when the body contains code: context_length_exceeded", () => {
+    const body = JSON.stringify({
+      error: {
+        message: "Request exceeds the context window of the model",
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+      },
+    });
+    const e = HttpApiError.fromResponse(400, "Bad Request", body);
+    expect(e.contextExceeded).toBe(true);
+    expect(e.category).toBe("bad-request");
+    expect(e.shouldRetry).toBe(false);
+    expect(e.suggestions.some((s) => /context window/i.test(s))).toBe(true);
+  });
+
+  it("does not flag contextExceeded for other 400 bodies", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", '{"error":{"code":"something_else"}}');
+    expect(e.contextExceeded).toBe(false);
+    expect(e.suggestions.some((s) => /smaller diff/i.test(s))).toBe(true);
+  });
+
+  it("does not flag contextExceeded when the body is not JSON", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", "not-json-at-all");
+    expect(e.contextExceeded).toBe(false);
+  });
+
+  it("does not flag contextExceeded when the body is empty", () => {
+    const e = HttpApiError.fromResponse(400, "Bad Request", "");
+    expect(e.contextExceeded).toBe(false);
   });
 });
 

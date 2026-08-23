@@ -11,8 +11,11 @@ message after a quick confirmation prompt.
 
 - Node.js **20+** (uses native `fetch`)
 - `git` on `PATH`
-- An API key for an [OpenAI-compatible](https://platform.openai.com/docs/api-reference/chat)
-  endpoint, exposed as `AICOMMIT_API_KEY`
+
+An API key is **optional**. The default endpoint (opencode.ai zen) and model
+(`big-pickle`) accept anonymous requests, so aicommit works out of the box
+without any configuration. Set `AICOMMIT_API_KEY` only if your provider
+requires one, or for access to paid models or higher rate limits.
 
 ## Install
 
@@ -20,10 +23,10 @@ message after a quick confirmation prompt.
 npm i -g @chof64/aicommit
 ```
 
-## Configure
+## Configure (optional)
 
 All settings come from environment variables. Defaults target
-[opencode.ai zen](https://opencode.ai), so most users only need a key:
+[opencode.ai zen](https://opencode.ai); to authenticate, export your key:
 
 ```sh
 export AICOMMIT_API_KEY=<your-key>
@@ -31,7 +34,7 @@ export AICOMMIT_API_KEY=<your-key>
 
 | Variable             | Default                       | Description                                        |
 | -------------------- | ----------------------------- | -------------------------------------------------- |
-| `AICOMMIT_API_KEY`   | — (required)                  | API key sent as `Authorization: Bearer <key>`.     |
+| `AICOMMIT_API_KEY`   | — (optional)                  | API key sent as `Authorization: Bearer <key>`.     |
 | `AICOMMIT_BASE_URL`  | `https://opencode.ai/zen/v1`  | OpenAI-compatible root URL of the endpoint.        |
 | `AICOMMIT_MODEL`     | `big-pickle`                  | Model id served at the endpoint.                   |
 
@@ -44,6 +47,9 @@ export AICOMMIT_BASE_URL=http://localhost:11434/v1
 export AICOMMIT_MODEL=llama3.2
 export AICOMMIT_API_KEY=ollama
 ```
+
+Note: during the free-period of Big Pickle, requests may be used to improve
+the model. Avoid sending diffs that contain personal or confidential data.
 
 ## Usage
 

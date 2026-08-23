@@ -2,15 +2,16 @@
  * Provider configuration resolved from environment variables.
  *
  * Defaults target opencode.ai zen; any OpenAI-compatible endpoint works by
- * overriding `AICOMMIT_BASE_URL` / `AICOMMIT_MODEL`.
+ * overriding `AICOMMIT_BASE_URL` / `AICOMMIT_MODEL`. The API key is optional:
+ * zen's `big-pickle` accepts anonymous requests, while other providers may
+ * still require one.
  */
-import { ConfigError } from "./errors.js";
-
 /** Resolved connection settings for the OpenAI-compatible endpoint. */
 export interface Config {
   /** Root URL — the AI SDK appends `/chat/completions`. */
   baseURL: string;
-  apiKey: string;
+  /** Sent as `Authorization: Bearer <key>` when set. */
+  apiKey?: string;
   model: string;
 }
 
@@ -22,21 +23,13 @@ export const DEFAULT_MODEL = "big-pickle";
 /**
  * Resolve provider settings from `env` (defaults to `process.env`).
  * `AICOMMIT_*` variables win; `OPENCODE_API_KEY` remains as a legacy
- * fallback for the key only. Throws {@link ConfigError} when no key is set.
+ * fallback for the key only. All settings are optional — unset values
+ * fall back to the zen defaults.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const baseURL = env.AICOMMIT_BASE_URL?.trim() || DEFAULT_BASE_URL;
-  const model = env.AICOMMIT_MODEL?.trim() || DEFAULT_MODEL;
-  const apiKey = env.AICOMMIT_API_KEY?.trim() || env.OPENCODE_API_KEY?.trim();
-
-  if (!apiKey) {
-    throw new ConfigError("AICOMMIT_API_KEY is not set", {
-      suggestions: [
-        "Set it with: export AICOMMIT_API_KEY=<your-key>",
-        "OPENCODE_API_KEY is honored as a fallback",
-      ],
-    });
-  }
-
-  return { baseURL, apiKey, model };
+  return {
+    baseURL: env.AICOMMIT_BASE_URL?.trim() || DEFAULT_BASE_URL,
+    apiKey: env.AICOMMIT_API_KEY?.trim() || env.OPENCODE_API_KEY?.trim() || undefined,
+    model: env.AICOMMIT_MODEL?.trim() || DEFAULT_MODEL,
+  };
 }

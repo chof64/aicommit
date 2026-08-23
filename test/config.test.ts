@@ -1,16 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BASE_URL, DEFAULT_MODEL, loadConfig } from "../src/config.js";
-import { ConfigError } from "../src/errors.js";
 
 describe("loadConfig", () => {
-  it("defaults to the opencode zen endpoint, big-pickle model, and requires a key", () => {
-    expect(loadConfig({ AICOMMIT_API_KEY: "k" })).toEqual({
+  it("defaults to the opencode zen endpoint and big-pickle model", () => {
+    expect(loadConfig({})).toEqual({
       baseURL: DEFAULT_BASE_URL,
-      apiKey: "k",
+      apiKey: undefined,
       model: DEFAULT_MODEL,
     });
     expect(DEFAULT_BASE_URL).toBe("https://opencode.ai/zen/v1");
     expect(DEFAULT_MODEL).toBe("big-pickle");
+  });
+
+  it("works with no key at all (keyless mode)", () => {
+    expect(loadConfig({}).apiKey).toBeUndefined();
+    expect(() => loadConfig({})).not.toThrow();
   });
 
   it("prefers AICOMMIT_* overrides over defaults", () => {
@@ -32,8 +36,9 @@ describe("loadConfig", () => {
     expect(loadConfig({ AICOMMIT_API_KEY: "new", OPENCODE_API_KEY: "old" }).apiKey).toBe("new");
   });
 
-  it("treats an empty AICOMMIT_API_KEY as unset and falls back", () => {
+  it("treats an empty or blank AICOMMIT_API_KEY as unset", () => {
     expect(loadConfig({ AICOMMIT_API_KEY: "", OPENCODE_API_KEY: "legacy" }).apiKey).toBe("legacy");
+    expect(loadConfig({ AICOMMIT_API_KEY: "   " }).apiKey).toBeUndefined();
   });
 
   it("falls back to defaults when baseURL/model overrides are blank", () => {
@@ -44,12 +49,5 @@ describe("loadConfig", () => {
     });
     expect(config.baseURL).toBe(DEFAULT_BASE_URL);
     expect(config.model).toBe(DEFAULT_MODEL);
-  });
-
-  it("throws ConfigError when no key is set", () => {
-    expect(() => loadConfig({})).toThrow(ConfigError);
-    expect(() => loadConfig({ AICOMMIT_API_KEY: "", OPENCODE_API_KEY: "" })).toThrow(
-      /AICOMMIT_API_KEY/,
-    );
   });
 });

@@ -1,9 +1,12 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
 import type { Config } from "./config.js";
+import { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff } from "./diff.js";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
+
+export { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff };
 
 export const TIMEOUT_MS = 60_000;
 
@@ -93,18 +96,24 @@ function validateCommitMessage(text: string): string {
 /**
  * One API call via the Vercel AI SDK.
  *
+ * The system prompt goes through the dedicated `system` parameter — the SDK
+ * rejects system roles placed inside `prompt`/`messages` with
+ * `InvalidPromptError`. `config.apiKey` may be undefined: opencode.ai zen
+ * accepts anonymous requests for `big-pickle`.
+ *
  * SDK-level retries are disabled (`maxRetries: 0`) so our custom loop — which
  * honors `Retry-After` headers and a total-wait budget — stays in charge.
  */
-async function callOnce(
-  provider: ReturnType<typeof createOpenAICompatible>,
-  model: string,
-  prompt: string,
-  signal: AbortSignal,
-): Promise<string> {
+async function callOnce(config: Config, prompt: string, signal: AbortSignal): Promise<string> {
+  const provider = createOpenAICompatible({
+    name: "opencode",
+    baseURL: config.baseURL,
+    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+  });
+
   try {
     const { text } = await generateText({
-      model: provider.chatModel(model),
+      model: provider.chatModel(config.model),
       system: SYSTEM_PROMPT,
       prompt,
       abortSignal: signal,
@@ -122,21 +131,23 @@ async function callOnce(
  * `hint`. Retries transient failures (429, 408, 5xx, network) with
  * exponential backoff up to {@link MAX_RETRIES}; non-retriable failures throw
  * immediately.
+ *
+ * On the specific 400 `context_length_exceeded` error, attempts a single
+ * automatic retry with a truncated diff before falling through to the
+ * normal retry policy. This consumes one of the MAX_RETRIES slots but
+ * skips backoff (the failure is deterministic, not transient). Truncation
+ * always re-derives from the source-of-truth `diff`, never from a
+ * previously truncated version.
  */
 export async function generateCommitMessage(
   config: Config,
   hint: string,
   diff: string,
 ): Promise<string> {
-  const provider = createOpenAICompatible({
-    name: "opencode",
-    baseURL: config.baseURL,
-    apiKey: config.apiKey,
-  });
-  const prompt = buildUserPrompt(hint, diff);
-
   let lastError: unknown;
   let elapsedWait = 0;
+  let truncationAttempted = false;
+  let workingDiff = diff;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -144,7 +155,7 @@ export async function generateCommitMessage(
 
     try {
       logVerbose("Sending request to API...");
-      const text = await callOnce(provider, config.model, prompt, controller.signal);
+      const text = await callOnce(config, buildUserPrompt(hint, workingDiff), controller.signal);
       clearTimeout(timer);
 
       const message = validateCommitMessage(text);
@@ -157,6 +168,20 @@ export async function generateCommitMessage(
       logVerbose(
         `Retry attempt ${attempt + 1}/${MAX_RETRIES + 1} failed (${category}): ${err instanceof Error ? err.message : String(err)}`,
       );
+
+      // Single-shot recovery for context overflow: truncate the diff and
+      // retry immediately. We skip backoff because the failure is
+      // deterministic — waiting won't help. This consumes one of the
+      // remaining MAX_RETRIES slots.
+      if (err instanceof HttpApiError && err.contextExceeded && !truncationAttempted) {
+        truncationAttempted = true;
+        workingDiff = truncateDiff(diff);
+        logVerbose(
+          `Diff exceeds context window; truncated to ${workingDiff.length} bytes and retrying once`,
+        );
+        logWarning("Diff exceeded model context window; retrying with a truncated diff");
+        continue;
+      }
 
       // Decide retry purely from the error itself. `shouldRetry` is set by
       // the error's own constructor — currently: 429, 408, 5xx, NetworkError.
