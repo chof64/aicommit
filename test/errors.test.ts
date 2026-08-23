@@ -101,14 +101,14 @@ describe("error hierarchy", () => {
 describe("formatError", () => {
   it("renders title, body, and suggestions for AicommitError", () => {
     const out = formatError(
-      new ConfigError("OPENCODE_API_KEY is not set", {
-        suggestions: ["Set it with: export OPENCODE_API_KEY=<value>"],
+      new ConfigError("AICOMMIT_API_KEY is not set", {
+        suggestions: ["Set it with: export AICOMMIT_API_KEY=<value>"],
       }),
       { verbose: false },
     );
     expect(out).toMatch(/Error:/);
-    expect(out).toMatch(/OPENCODE_API_KEY is not set/);
-    expect(out).toMatch(/Set it with: export OPENCODE_API_KEY/);
+    expect(out).toMatch(/AICOMMIT_API_KEY is not set/);
+    expect(out).toMatch(/Set it with: export AICOMMIT_API_KEY/);
   });
 
   it("includes cause details in verbose mode", () => {

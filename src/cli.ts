@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { Command } from "commander";
-import { buildMessages, callWithRetry, parseCommitMessage } from "./api.js";
+import { generateCommitMessage } from "./api.js";
+import { loadConfig } from "./config.js";
 import { AbortError, AicommitError, ConfigError, formatError, ValidationError } from "./errors.js";
 import { executeCommit, getStagedDiff } from "./git.js";
 import { getVerbose, log, logError, logVerbose, reset, setVerbose } from "./logger.js";
@@ -10,17 +11,6 @@ import { PACKAGE_VERSION } from "./pkg.js";
 export interface CliOptions {
   dryRun?: boolean;
   verbose?: boolean;
-}
-
-/** Read a required environment variable. Throws ConfigError on miss. */
-function getEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new ConfigError(`${name} is not set`, {
-      suggestions: [`Set it with: export ${name}=<your-key>`],
-    });
-  }
-  return value;
 }
 
 /**
@@ -103,7 +93,6 @@ export function run(): void {
       setVerbose(Boolean(options.verbose));
 
       const hint = hintArgs.join(" ");
-      const hintPrompt = hint ? `Context/hint: ${hint} ` : "";
 
       logVerbose("Starting aicommit");
       if (options.dryRun) logVerbose("Dry-run mode enabled");
@@ -112,11 +101,8 @@ export function run(): void {
       const diff = await getStagedDiff();
 
       log("Generating commit message...");
-      const apiKey = getEnv("OPENCODE_API_KEY");
-
-      const messages = buildMessages(hintPrompt, diff);
-      const response = await callWithRetry(messages, apiKey);
-      const message = sanitizeCommitMessage(parseCommitMessage(response));
+      const config = loadConfig();
+      const message = sanitizeCommitMessage(await generateCommitMessage(config, hint, diff));
 
       if (options.dryRun) {
         log("Dry run complete. No changes were committed.");

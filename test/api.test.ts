@@ -1,20 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiResponse } from "../src/api.js";
 import {
   backoffMs,
-  buildMessages,
-  callWithRetry,
+  buildUserPrompt,
+  generateCommitMessage,
   MAX_RETRIES,
   MAX_TOTAL_WAIT_MS,
-  parseCommitMessage,
   RETRY_BASE_MS,
   RETRY_MAX_MS,
   redact,
   SYSTEM_PROMPT,
   USER_AGENT,
 } from "../src/api.js";
+import type { Config } from "../src/config.js";
 import { HttpApiError, ParseError, TimeoutError } from "../src/errors.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "../src/pkg.js";
+
+const CONFIG: Config = {
+  baseURL: "https://api.example.com/v1",
+  apiKey: "test-key",
+  model: "test-model",
+};
+
+/** OpenAI-compatible chat-completions success body carrying `content`. */
+function okResponse(content: string): Response {
+  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Run the happy-path call against stubbed global fetch. */
+function generate(): Promise<string> {
+  return generateCommitMessage(CONFIG, "", "the diff");
+}
 
 describe("USER_AGENT", () => {
   it("identifies the npm package and version", () => {
@@ -23,55 +41,281 @@ describe("USER_AGENT", () => {
   });
 });
 
-describe("buildMessages", () => {
-  it("produces a system message and a user message", () => {
-    const msgs = buildMessages("", "diff --git a");
-    expect(msgs).toHaveLength(2);
-    expect(msgs[0]?.role).toBe("system");
-    expect(msgs[0]?.content).toBe(SYSTEM_PROMPT);
-    expect(msgs[1]?.role).toBe("user");
-    expect(msgs[1]?.content).toContain("diff --git a");
-  });
-
-  it("emits the standard instruction tail in the user prompt", () => {
-    const msgs = buildMessages("", "the diff");
-    expect(msgs[1]?.content).toMatch(/conventional commit format/);
-    expect(msgs[1]?.content.endsWith("the diff")).toBe(true);
+describe("buildUserPrompt", () => {
+  it("emits the instruction tail followed by the diff", () => {
+    const prompt = buildUserPrompt("", "the diff");
+    expect(prompt).toContain("conventional commit format");
+    expect(prompt.endsWith("the diff")).toBe(true);
   });
 
   it("prepends the hint prefix when a hint is given", () => {
-    const msgs = buildMessages("Context/hint: fix bug ", "the diff");
-    expect(msgs[1]?.content.startsWith("Context/hint: fix bug ")).toBe(true);
+    expect(buildUserPrompt("fix bug", "the diff").startsWith("Context/hint: fix bug ")).toBe(true);
   });
 
   it("does not prepend a hint prefix when none is given", () => {
-    const msgs = buildMessages("", "the diff");
-    expect(msgs[1]?.content.startsWith("Context/hint:")).toBe(false);
+    expect(buildUserPrompt("", "the diff").startsWith("Context/hint:")).toBe(false);
   });
 });
 
-describe("parseCommitMessage", () => {
-  it("extracts the trimmed content from the first choice", () => {
-    const out = parseCommitMessage({
-      choices: [{ message: { content: "  feat: thing\n" } }],
-    });
-    expect(out).toBe("feat: thing");
+describe("generateCommitMessage", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
   });
 
-  it("throws ParseError on empty content", () => {
-    expect(() => parseCommitMessage({ choices: [{ message: { content: "" } }] })).toThrow(
-      ParseError,
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("returns the trimmed message on first success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse("  feat: thing\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generate()).resolves.toBe("feat: thing");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends system+user messages built from hint and diff", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse("feat: x"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateCommitMessage(CONFIG, "fix bug", "the diff");
+
+    const [, init] = fetchMock.mock.calls[0] as [unknown, { body: string }];
+    const body = JSON.parse(init.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages[0]).toEqual({ role: "system", content: SYSTEM_PROMPT });
+    expect(body.messages[1]?.role).toBe("user");
+    expect(body.messages[1]?.content).toContain("Context/hint: fix bug");
+    expect(body.messages[1]?.content.endsWith("the diff")).toBe(true);
+  });
+
+  it.each(["", "null"])("throws ParseError on %s content without retrying", async (content) => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse(content));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = generate().then(
+      () => "resolved",
+      (e) => e,
     );
+    // Advance past any possible backoff window — empty output must not retry.
+    await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * (MAX_RETRIES + 1));
+    const result = (await settled) as unknown;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toBeInstanceOf(ParseError);
   });
 
-  it("throws ParseError on the literal string 'null'", () => {
-    expect(() => parseCommitMessage({ choices: [{ message: { content: "null" } }] })).toThrow(
-      ParseError,
+  it("retries after a 500 and succeeds on the second attempt (5xx is transient)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("nope", { status: 500, statusText: "Server Error" }))
+      .mockResolvedValueOnce(okResponse("feat: retry"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = generate().catch((e) => e);
+    // First retry waits RETRY_BASE_MS (2s).
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toBe("feat: retry");
+  });
+
+  it("retries 429 with exponential backoff", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("slow", { status: 429, statusText: "Too Many Requests" }))
+      .mockResolvedValueOnce(okResponse("feat: ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = generate().catch((e) => e);
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toBe("feat: ok");
+  });
+
+  it("retries 408 with exponential backoff", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("slow", { status: 408, statusText: "Request Timeout" }))
+      .mockResolvedValueOnce(okResponse("feat: ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = generate().catch((e) => e);
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toBe("feat: ok");
+  });
+
+  it("honors Retry-After header on a 429", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "Retry-After": "10" },
+        }),
+      )
+      .mockResolvedValueOnce(okResponse("feat: ok"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = generate().catch((e) => e);
+    // Retry-After overrides the 2s exponential delay with 10s.
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toBe("feat: ok");
+  });
+
+  it("rethrows the last HttpApiError after exhausting retries on persistent 503", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = generate().then(
+      () => "resolved",
+      (e) => e,
     );
+    // Walk the exponential schedule: 2s, 4s, 8s = 14s total across 3 retries.
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      await vi.advanceTimersByTimeAsync(backoffMs(i));
+    }
+    const result = (await settled) as unknown;
+
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    expect(result).toBeInstanceOf(HttpApiError);
+    expect((result as HttpApiError).status).toBe(503);
   });
 
-  it("throws ParseError on missing choices", () => {
-    expect(() => parseCommitMessage({} as unknown as ApiResponse)).toThrow(ParseError);
+  it.each([401, 403, 400])("does not retry on %i (auth/bad-request)", async (status) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("nope", { status, statusText: "Nope" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = generate().then(
+      () => "resolved",
+      (e) => e,
+    );
+    // Advance past the entire possible backoff window to ensure no retry fires.
+    await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * (MAX_RETRIES + 1));
+    const result = (await settled) as unknown;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toBeInstanceOf(HttpApiError);
+    expect((result as HttpApiError).status).toBe(status);
+  });
+
+  it("does not retry on TimeoutError", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = generate().then(
+      () => "resolved",
+      (e) => e,
+    );
+    // Advance past TIMEOUT_MS (60s) to trigger the abort, then drain microtasks.
+    await vi.advanceTimersByTimeAsync(61_000);
+    const result = (await settled) as unknown;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toBeInstanceOf(TimeoutError);
+  });
+
+  it("wraps an unparseable 200 body in ParseError", async () => {
+    // This test exercises a real microtask (response parsing) — fake timers
+    // would starve it. Disable them locally.
+    vi.useRealTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("not-json{{", { status: 200, statusText: "OK" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = (await generate().catch((e) => e)) as unknown;
+
+    expect(result).toBeInstanceOf(ParseError);
+    expect((result as ParseError).cause).toBeDefined();
+  });
+});
+
+describe("MAX_TOTAL_WAIT_MS cap", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("clamps per-retry delay so total wait never exceeds MAX_TOTAL_WAIT_MS", async () => {
+    // Each response would ask for 999s of Retry-After — the cap must clamp
+    // the very first retry's delay to MAX_TOTAL_WAIT_MS, and the second
+    // retry's remaining budget to 0, which triggers an early break.
+    const rateLimited = () =>
+      new Response("slow", {
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { "Retry-After": "999" },
+      });
+    const fetchMock = vi.fn().mockResolvedValue(rateLimited());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = generate().then(
+      () => "resolved",
+      (e) => e,
+    );
+    // Walk fake timers up to (and past) the cap. The loop must bail on its
+    // own; advancing extra is just a safety net.
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      await vi.advanceTimersByTimeAsync(MAX_TOTAL_WAIT_MS);
+    }
+    const result = (await settled) as unknown;
+
+    // The cap caused at most 2 fetches (initial + 1 retry that was clamped),
+    // and the final error is a retriable HttpApiError from the rate-limit path.
+    expect(result).toBeInstanceOf(HttpApiError);
+    expect((result as HttpApiError).category).toBe("rate-limit");
+  });
+
+  it("preserves the natural 2s/4s/8s schedule when no Retry-After is present", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const settled = generate().then(
+      () => "resolved",
+      (e) => e,
+    );
+    // 2s + 4s + 8s = 14s, well under the 30s cap. We should see all 4 fetches.
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      await vi.advanceTimersByTimeAsync(backoffMs(i));
+    }
+    const result = (await settled) as unknown;
+
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    expect(result).toBeInstanceOf(HttpApiError);
   });
 });
 
@@ -104,281 +348,12 @@ describe("backoffMs", () => {
   });
 });
 
-describe("callWithRetry", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  it("returns the response on first success without sleeping", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ choices: [{ message: { content: "feat: x" } }] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await callWithRetry([{ role: "user", content: "hi" }], "k");
-    expect(result.choices[0]?.message.content).toBe("feat: x");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("retries after a 500 and succeeds on the second attempt (5xx is transient)", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("nope", { status: 500, statusText: "Server Error" }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ choices: [{ message: { content: "feat: retry" } }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
-    // First retry waits RETRY_BASE_MS (2s).
-    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
-    const result = await promise;
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({
-      choices: [{ message: { content: "feat: retry" } }],
-    });
-  });
-
-  it("retries 429 with exponential backoff", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("slow", { status: 429, statusText: "Too Many Requests" }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
-    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
-    const result = await promise;
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({ choices: [{ message: { content: "feat: ok" } }] });
-  });
-
-  it("retries 408 with exponential backoff", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("slow", { status: 408, statusText: "Request Timeout" }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
-    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS);
-    const result = await promise;
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({ choices: [{ message: { content: "feat: ok" } }] });
-  });
-
-  it("honors Retry-After header on a 429", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response("slow", {
-          status: 429,
-          statusText: "Too Many Requests",
-          headers: { "Retry-After": "10" },
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ choices: [{ message: { content: "feat: ok" } }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const promise = callWithRetry([{ role: "user", content: "hi" }], "k").catch((e) => e);
-    // Retry-After overrides the 2s exponential delay with 10s.
-    await vi.advanceTimersByTimeAsync(10_000);
-    const result = await promise;
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({ choices: [{ message: { content: "feat: ok" } }] });
-  });
-
-  it("rethrows the last HttpApiError after exhausting retries on persistent 503", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
-      () => "resolved",
-      (e) => e,
-    );
-    // Walk the exponential schedule: 2s, 4s, 8s = 14s total across 3 retries.
-    for (let i = 0; i < MAX_RETRIES; i++) {
-      await vi.advanceTimersByTimeAsync(backoffMs(i));
-    }
-    const result = (await settled) as unknown;
-
-    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
-    expect(result).toBeInstanceOf(HttpApiError);
-    expect((result as HttpApiError).status).toBe(503);
-  });
-
-  it.each([401, 403, 400])("does not retry on %i (auth/bad-request)", async (status) => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response("nope", { status, statusText: "Nope" }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
-      () => "resolved",
-      (e) => e,
-    );
-    // Advance past the entire possible backoff window to ensure no retry fires.
-    await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * (MAX_RETRIES + 1));
-    const result = (await settled) as unknown;
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(result).toBeInstanceOf(HttpApiError);
-    expect((result as HttpApiError).status).toBe(status);
-  });
-
-  it("does not retry on TimeoutError", async () => {
-    const fetchMock = vi.fn().mockImplementation(
-      (_input: unknown, init?: { signal?: AbortSignal }) =>
-        new Promise<never>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => {
-            const err = new Error("aborted");
-            err.name = "AbortError";
-            reject(err);
-          });
-        }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
-      () => "resolved",
-      (e) => e,
-    );
-    // Advance past TIMEOUT_MS (60s) to trigger the abort, then drain microtasks.
-    await vi.advanceTimersByTimeAsync(61_000);
-    const result = (await settled) as unknown;
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(result).toBeInstanceOf(TimeoutError);
-  });
-
-  it("wraps response.json() parse failure in ParseError", async () => {
-    // This test exercises a real microtask (response.json()) — fake timers
-    // would starve it. Disable them locally.
-    vi.useRealTimers();
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response("not-json{{", { status: 200, statusText: "OK" }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = (await callWithRetry([{ role: "user", content: "hi" }], "k").catch(
-      (e) => e,
-    )) as unknown;
-
-    expect(result).toBeInstanceOf(ParseError);
-    expect((result as ParseError).cause).toBeDefined();
-  });
-});
-
-describe("MAX_TOTAL_WAIT_MS cap", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  it("clamps per-retry delay so total wait never exceeds MAX_TOTAL_WAIT_MS", async () => {
-    // Each response would ask for 999s of Retry-After — the cap must clamp
-    // the very first retry's delay to MAX_TOTAL_WAIT_MS, and the second
-    // retry's remaining budget to 0, which triggers an early break.
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response("slow", {
-          status: 429,
-          statusText: "Too Many Requests",
-          headers: { "Retry-After": "999" },
-        }),
-      )
-      .mockResolvedValue(
-        new Response("slow", {
-          status: 429,
-          statusText: "Too Many Requests",
-          headers: { "Retry-After": "999" },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
-      () => "resolved",
-      (e) => e,
-    );
-    // Walk fake timers up to (and past) the cap. The loop must bail on its
-    // own; advancing extra is just a safety net.
-    for (let i = 0; i < MAX_RETRIES; i++) {
-      await vi.advanceTimersByTimeAsync(MAX_TOTAL_WAIT_MS);
-    }
-    const result = (await settled) as unknown;
-
-    // The cap caused at most 2 fetches (initial + 1 retry that was clamped),
-    // and the final error is a retriable HttpApiError from the rate-limit path.
-    expect(result).toBeInstanceOf(HttpApiError);
-    expect((result as HttpApiError).category).toBe("rate-limit");
-  });
-
-  it("preserves the natural 2s/4s/8s schedule when no Retry-After is present", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response("down", { status: 503, statusText: "Service Unavailable" }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const settled = callWithRetry([{ role: "user", content: "hi" }], "k").then(
-      () => "resolved",
-      (e) => e,
-    );
-    // 2s + 4s + 8s = 14s, well under the 30s cap. We should see all 4 fetches.
-    for (let i = 0; i < MAX_RETRIES; i++) {
-      await vi.advanceTimersByTimeAsync(backoffMs(i));
-    }
-    const result = (await settled) as unknown;
-
-    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
-    expect(result).toBeInstanceOf(HttpApiError);
-  });
-});
-
 describe("HttpApiError.fromResponse", () => {
   it("maps 401 and 403 to auth with a verification hint", () => {
     const e401 = HttpApiError.fromResponse(401, "Unauthorized", "");
     expect(e401.category).toBe("auth");
     expect(e401.shouldRetry).toBe(false);
-    expect(e401.suggestions.some((s) => /OPENCODE_API_KEY/.test(s))).toBe(true);
+    expect(e401.suggestions.some((s) => /AICOMMIT_API_KEY/.test(s))).toBe(true);
 
     const e403 = HttpApiError.fromResponse(403, "Forbidden", "");
     expect(e403.category).toBe("auth");

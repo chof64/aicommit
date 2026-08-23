@@ -1,30 +1,10 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
+import type { Config } from "./config.js";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
 
-/** A single chat message in the OpenAI-compatible API format. */
-export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-/** Minimal shape of the API response we consume. */
-export interface ApiResponse {
-  choices: Array<{
-    message: { content: string };
-  }>;
-}
-
-/**
- * OpenAI-compatible base URL for opencode.ai zen.
- * Chat completions are served at `${BASE_URL}/chat/completions`.
- */
-export const BASE_URL = "https://opencode.ai/zen/v1";
-/** Full chat-completions endpoint (kept for docs/compat; AI SDK uses {@link BASE_URL}). */
-export const ENDPOINT = `${BASE_URL}/chat/completions`;
-export const MODEL = "big-pickle";
 export const TIMEOUT_MS = 60_000;
 
 /** Total retry budget: 1 initial attempt + MAX_RETRIES retries. */
@@ -45,16 +25,10 @@ export const USER_PROMPT_TAIL =
 
 export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION}`;
 
-/** Build the system+user message pair for the chat-completions API. */
-export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
-  const userContent = hintPrompt
-    ? `${hintPrompt}${USER_PROMPT_TAIL}\n\n${diff}`
-    : `${USER_PROMPT_TAIL}\n\n${diff}`;
-
-  return [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: userContent },
-  ];
+/** Build the user prompt: optional hint prefix, instruction tail, then the diff. */
+export function buildUserPrompt(hint: string, diff: string): string {
+  const hintPrefix = hint ? `Context/hint: ${hint} ` : "";
+  return `${hintPrefix}${USER_PROMPT_TAIL}\n\n${diff}`;
 }
 
 /** Truncate a string for safe verbose logging. */
@@ -107,42 +81,60 @@ function mapSdkError(err: unknown): never {
   throw new NetworkError("Network error reaching the API", { cause: err });
 }
 
+/** Reject empty or placeholder model output before it reaches git commit. */
+function validateCommitMessage(text: string): string {
+  const message = text.trim();
+  if (!message || message === "null") {
+    throw new ParseError("Invalid API response: empty or null content");
+  }
+  return message;
+}
+
 /**
  * One API call via the Vercel AI SDK.
  *
- * Follow-ups (hold for a later pass):
- * - Prefer `generateText({ maxRetries, timeout })` over our custom retry loop
- * - Drop the `ApiResponse` shim and return text directly from `callWithRetry`
- * - Use `system` + `prompt` instead of hand-built message arrays
+ * SDK-level retries are disabled (`maxRetries: 0`) so our custom loop — which
+ * honors `Retry-After` headers and a total-wait budget — stays in charge.
  */
 async function callOnce(
-  messages: ChatMessage[],
-  apiKey: string,
+  provider: ReturnType<typeof createOpenAICompatible>,
+  model: string,
+  prompt: string,
   signal: AbortSignal,
-): Promise<ApiResponse> {
-  const provider = createOpenAICompatible({
-    name: "opencode",
-    baseURL: BASE_URL,
-    apiKey,
-  });
-
+): Promise<string> {
   try {
     const { text } = await generateText({
-      model: provider.chatModel(MODEL),
-      messages,
+      model: provider.chatModel(model),
+      system: SYSTEM_PROMPT,
+      prompt,
       abortSignal: signal,
-      // Keep our existing retry policy; avoid stacking SDK retries on top.
       maxRetries: 0,
       headers: { "User-Agent": USER_AGENT },
     });
-    return { choices: [{ message: { content: text } }] };
+    return text;
   } catch (err) {
     mapSdkError(err);
   }
 }
 
-/** Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories. */
-export async function callWithRetry(messages: ChatMessage[], apiKey: string): Promise<ApiResponse> {
+/**
+ * Generate a commit message from the staged `diff`, optionally steered by
+ * `hint`. Retries transient failures (429, 408, 5xx, network) with
+ * exponential backoff up to {@link MAX_RETRIES}; non-retriable failures throw
+ * immediately.
+ */
+export async function generateCommitMessage(
+  config: Config,
+  hint: string,
+  diff: string,
+): Promise<string> {
+  const provider = createOpenAICompatible({
+    name: "opencode",
+    baseURL: config.baseURL,
+    apiKey: config.apiKey,
+  });
+  const prompt = buildUserPrompt(hint, diff);
+
   let lastError: unknown;
   let elapsedWait = 0;
 
@@ -152,10 +144,12 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
 
     try {
       logVerbose("Sending request to API...");
-      const data = await callOnce(messages, apiKey, controller.signal);
+      const text = await callOnce(provider, config.model, prompt, controller.signal);
       clearTimeout(timer);
-      logVerbose("Response received, parsing...");
-      return data;
+
+      const message = validateCommitMessage(text);
+      logVerbose(`Parsed commit message: ${redact(message)}`);
+      return message;
     } catch (err) {
       clearTimeout(timer);
       lastError = err;
@@ -193,14 +187,4 @@ export async function callWithRetry(messages: ChatMessage[], apiKey: string): Pr
   throw lastError instanceof Error
     ? lastError
     : new ParseError("Failed to generate commit message", { cause: lastError });
-}
-
-/** Extract the commit message text from the API response. Throws on bad shape. */
-export function parseCommitMessage(data: ApiResponse): string {
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content || content === "null") {
-    throw new ParseError("Invalid API response: empty or null content");
-  }
-  logVerbose(`Parsed commit message: ${redact(content)}`);
-  return content;
 }
