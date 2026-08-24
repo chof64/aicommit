@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { Command } from "commander";
-import { buildMessages, callWithRetry, parseCommitMessage } from "./api.js";
+import { generateCommitMessage } from "./api.js";
+import { loadConfig } from "./config.js";
 import { AbortError, AicommitError, ConfigError, formatError, ValidationError } from "./errors.js";
 import { executeCommit, getStagedDiff } from "./git.js";
 import { getVerbose, log, logError, logVerbose, reset, setVerbose } from "./logger.js";
@@ -92,7 +93,6 @@ export function run(): void {
       setVerbose(Boolean(options.verbose));
 
       const hint = hintArgs.join(" ");
-      const hintPrompt = hint ? `Context/hint: ${hint} ` : "";
 
       logVerbose("Starting aicommit");
       if (options.dryRun) logVerbose("Dry-run mode enabled");
@@ -101,11 +101,8 @@ export function run(): void {
       const diff = await getStagedDiff();
 
       log("Generating commit message...");
-      const apiKey = process.env.OPENCODE_API_KEY;
-
-      const messages = buildMessages(hintPrompt, diff);
-      const response = await callWithRetry(messages, diff, hintPrompt, apiKey);
-      const message = sanitizeCommitMessage(parseCommitMessage(response));
+      const config = loadConfig();
+      const message = sanitizeCommitMessage(await generateCommitMessage(config, hint, diff));
 
       if (options.dryRun) {
         log("Dry run complete. No changes were committed.");

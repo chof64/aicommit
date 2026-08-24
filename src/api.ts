@@ -1,5 +1,6 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
+import type { Config } from "./config.js";
 import { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff } from "./diff.js";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
@@ -7,27 +8,6 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
 
 export { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff };
 
-/** A single chat message in the OpenAI-compatible API format. */
-export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-/** Minimal shape of the API response we consume. */
-export interface ApiResponse {
-  choices: Array<{
-    message: { content: string };
-  }>;
-}
-
-/**
- * OpenAI-compatible base URL for opencode.ai zen.
- * Chat completions are served at `${BASE_URL}/chat/completions`.
- */
-export const BASE_URL = "https://opencode.ai/zen/v1";
-/** Full chat-completions endpoint (kept for docs/compat; AI SDK uses {@link BASE_URL}). */
-export const ENDPOINT = `${BASE_URL}/chat/completions`;
-export const MODEL = "big-pickle";
 export const TIMEOUT_MS = 60_000;
 
 /** Total retry budget: 1 initial attempt + MAX_RETRIES retries. */
@@ -48,16 +28,10 @@ export const USER_PROMPT_TAIL =
 
 export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION}`;
 
-/** Build the system+user message pair for the chat-completions API. */
-export function buildMessages(hintPrompt: string, diff: string): ChatMessage[] {
-  const userContent = hintPrompt
-    ? `${hintPrompt}${USER_PROMPT_TAIL}\n\n${diff}`
-    : `${USER_PROMPT_TAIL}\n\n${diff}`;
-
-  return [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: userContent },
-  ];
+/** Build the user prompt: optional hint prefix, instruction tail, then the diff. */
+export function buildUserPrompt(hint: string, diff: string): string {
+  const hintPrefix = hint ? `Context/hint: ${hint} ` : "";
+  return `${hintPrefix}${USER_PROMPT_TAIL}\n\n${diff}`;
 }
 
 /** Truncate a string for safe verbose logging. */
@@ -110,84 +84,70 @@ function mapSdkError(err: unknown): never {
   throw new NetworkError("Network error reaching the API", { cause: err });
 }
 
+/** Reject empty or placeholder model output before it reaches git commit. */
+function validateCommitMessage(text: string): string {
+  const message = text.trim();
+  if (!message || message === "null") {
+    throw new ParseError("Invalid API response: empty or null content");
+  }
+  return message;
+}
+
 /**
  * One API call via the Vercel AI SDK.
  *
- * The system prompt is split off from the `messages` array and passed via
- * the `instructions` parameter. The AI SDK >= 5 rejects system messages
- * placed in `messages` with `InvalidPromptError`, so we extract the first
- * `system` message here. Anything else (user/assistant turns) stays in
- * `messages`.
+ * The system prompt goes through the dedicated `system` parameter — the SDK
+ * rejects system roles placed inside `prompt`/`messages` with
+ * `InvalidPromptError`. `config.apiKey` may be undefined: opencode.ai zen
+ * accepts anonymous requests for `big-pickle`.
+ *
+ * SDK-level retries are disabled (`maxRetries: 0`) so our custom loop — which
+ * honors `Retry-After` headers and a total-wait budget — stays in charge.
  */
-async function callOnce(
-  messages: ChatMessage[],
-  apiKey: string | undefined,
-  signal: AbortSignal,
-): Promise<ApiResponse> {
+async function callOnce(config: Config, prompt: string, signal: AbortSignal): Promise<string> {
   const provider = createOpenAICompatible({
     name: "opencode",
-    baseURL: BASE_URL,
-    ...(apiKey ? { apiKey } : {}),
+    baseURL: config.baseURL,
+    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
   });
 
   try {
     const { text } = await generateText({
-      model: provider.chatModel(MODEL),
-      instructions: messages.find((message) => message.role === "system")?.content,
-      messages: messages.filter((message) => message.role !== "system"),
+      model: provider.chatModel(config.model),
+      system: SYSTEM_PROMPT,
+      prompt,
       abortSignal: signal,
-      // Keep our existing retry policy; avoid stacking SDK retries on top.
       maxRetries: 0,
       headers: { "User-Agent": USER_AGENT },
     });
-    return { choices: [{ message: { content: text } }] };
+    return text;
   } catch (err) {
     mapSdkError(err);
   }
 }
 
 /**
- * Rebuild the messages array with a truncated diff in place. Preserves all
- * leading non-user messages (e.g. `system`) from the input and replaces
- * the user message with one whose instructions/diff reflect the truncated
- * diff. The hint prefix and instruction tail are reapplied so the model
- * sees the same prompt shape, just with a smaller diff.
- */
-function rebuildMessagesWithDiff(
-  messages: ChatMessage[],
-  hintPrompt: string,
-  truncatedDiff: string,
-): ChatMessage[] {
-  const userContent = `${hintPrompt}${USER_PROMPT_TAIL}\n\n${truncatedDiff}`;
-  // Keep any leading non-user messages (e.g. system prompt) so the model
-  // sees the same role topology. Then append the new user message.
-  const head = messages.filter((m) => m.role !== "user");
-  return [...head, { role: "user", content: userContent }];
-}
-
-/**
- * Call the API with up to MAX_RETRIES retries. Skips retries for non-transient categories.
+ * Generate a commit message from the staged `diff`, optionally steered by
+ * `hint`. Retries transient failures (429, 408, 5xx, network) with
+ * exponential backoff up to {@link MAX_RETRIES}; non-retriable failures throw
+ * immediately.
  *
  * On the specific 400 `context_length_exceeded` error, attempts a single
  * automatic retry with a truncated diff before falling through to the
  * normal retry policy. This consumes one of the MAX_RETRIES slots but
- * skips backoff (the failure is deterministic, not transient).
- *
- * `originalDiff` is passed alongside `messages` so the retry path can
- * re-truncate from the source-of-truth diff rather than a previously
- * truncated version. `apiKey` may be undefined — opencode.ai zen accepts
- * anonymous requests for `big-pickle`.
+ * skips backoff (the failure is deterministic, not transient). Truncation
+ * always re-derives from the source-of-truth `diff`, never from a
+ * previously truncated version.
  */
-export async function callWithRetry(
-  messages: ChatMessage[],
-  originalDiff: string,
-  hintPrompt: string,
-  apiKey: string | undefined,
-): Promise<ApiResponse> {
+export async function generateCommitMessage(
+  config: Config,
+  hint: string,
+  diff: string,
+): Promise<string> {
   let lastError: unknown;
   let elapsedWait = 0;
   let truncationAttempted = false;
-  let workingMessages = messages;
+  let workingDiff = diff;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -195,10 +155,12 @@ export async function callWithRetry(
 
     try {
       logVerbose("Sending request to API...");
-      const data = await callOnce(workingMessages, apiKey, controller.signal);
+      const text = await callOnce(config, buildUserPrompt(hint, workingDiff), controller.signal);
       clearTimeout(timer);
-      logVerbose("Response received, parsing...");
-      return data;
+
+      const message = validateCommitMessage(text);
+      logVerbose(`Parsed commit message: ${redact(message)}`);
+      return message;
     } catch (err) {
       clearTimeout(timer);
       lastError = err;
@@ -213,10 +175,9 @@ export async function callWithRetry(
       // remaining MAX_RETRIES slots.
       if (err instanceof HttpApiError && err.contextExceeded && !truncationAttempted) {
         truncationAttempted = true;
-        const truncated = truncateDiff(originalDiff);
-        workingMessages = rebuildMessagesWithDiff(workingMessages, hintPrompt, truncated);
+        workingDiff = truncateDiff(diff);
         logVerbose(
-          `Diff exceeds context window; truncated to ${truncated.length} bytes and retrying once`,
+          `Diff exceeds context window; truncated to ${workingDiff.length} bytes and retrying once`,
         );
         logWarning("Diff exceeded model context window; retrying with a truncated diff");
         continue;
@@ -251,14 +212,4 @@ export async function callWithRetry(
   throw lastError instanceof Error
     ? lastError
     : new ParseError("Failed to generate commit message", { cause: lastError });
-}
-
-/** Extract the commit message text from the API response. Throws on bad shape. */
-export function parseCommitMessage(data: ApiResponse): string {
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content || content === "null") {
-    throw new ParseError("Invalid API response: empty or null content");
-  }
-  logVerbose(`Parsed commit message: ${redact(content)}`);
-  return content;
 }

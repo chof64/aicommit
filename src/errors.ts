@@ -175,7 +175,7 @@ export class HttpApiError extends AicommitError {
         status,
         category: "auth",
         suggestions: [
-          "If you set OPENCODE_API_KEY, verify it is valid",
+          "If you set AICOMMIT_API_KEY (or OPENCODE_API_KEY), verify it is valid",
           "Otherwise the upstream may be rate-limiting anonymous requests — try again later",
         ],
       });
