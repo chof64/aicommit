@@ -19,6 +19,7 @@ const CONFIG: Config = {
   baseURL: "https://api.example.com/v1",
   apiKey: "test-key",
   model: "test-model",
+  contextTokens: 16_000,
 };
 
 /** OpenAI-compatible chat-completions success body carrying `content`. */
@@ -270,6 +271,39 @@ describe("generateCommitMessage", () => {
       generateCommitMessage({ ...CONFIG, apiKey: undefined }, "", "the diff"),
     ).resolves.toBe("feat: x");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("proactively truncates an oversized diff before the first request", async () => {
+    // A tiny context window yields a small byte budget, so the very first
+    // request must already carry a truncated diff — no 400 required.
+    const fetchMock = vi.fn().mockResolvedValue(okResponse("feat: small"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateCommitMessage({ ...CONFIG, contextTokens: 2_000 }, "", bigDiff());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [unknown, { body: string }];
+    const body = JSON.parse(init.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const userMessage = body.messages.find((m) => m.role === "user")?.content ?? "";
+    expect(userMessage).toMatch(/omitted|truncated to fit model context window/);
+    expect(userMessage.length).toBeLessThan(bigDiff().length);
+  });
+
+  it("prepends a scope overview so the model sees total change size", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse("feat: x"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateCommitMessage({ ...CONFIG, contextTokens: 2_000 }, "", bigDiff());
+
+    const [, init] = fetchMock.mock.calls[0] as [unknown, { body: string }];
+    const body = JSON.parse(init.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const userMessage = body.messages.find((m) => m.role === "user")?.content ?? "";
+    expect(userMessage).toContain("1 file changed");
+    expect(userMessage).toContain("a/foo: ");
   });
 
   it("auto-retries once with a truncated diff on context_length_exceeded", async () => {

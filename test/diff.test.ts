@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff } from "../src/diff.js";
+import {
+  buildDiffOverview,
+  computeDiffBudget,
+  countDiffStats,
+  DEFAULT_CONTEXT_LINES,
+  DEFAULT_MAX_DIFF_BYTES,
+  truncateDiff,
+} from "../src/diff.js";
 
 describe("truncateDiff", () => {
   it("returns the input unchanged when it fits the budget", () => {
@@ -90,6 +97,103 @@ describe("truncateDiff", () => {
     const noise = "garbage\n".repeat(200);
     const out = truncateDiff(noise, { maxBytes: 100 });
     expect(out.length).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("countDiffStats", () => {
+  it("counts files, insertions, deletions across multiple entries", () => {
+    const diff = [
+      "diff --git a/a.txt b/a.txt",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -1,2 +1,3 @@",
+      "-old",
+      "+new",
+      "+extra",
+      "diff --git a/b.txt b/b.txt",
+      "--- a/b.txt",
+      "+++ b/b.txt",
+      "@@ -10,1 +10,1 @@",
+      "-x",
+      "+y",
+    ].join("\n");
+    expect(countDiffStats(diff)).toEqual({
+      files: 2,
+      insertions: 3,
+      deletions: 2,
+      hasBinary: false,
+    });
+  });
+
+  it("ignores +/- prefixes on hunk header lines (--- / +++)", () => {
+    const diff =
+      "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-+literal-plus\n+-literal-minus\n";
+    const stats = countDiffStats(diff);
+    expect(stats.insertions).toBe(1);
+    expect(stats.deletions).toBe(1);
+  });
+
+  it("flags hasBinary when a Binary files line is present", () => {
+    const diff = "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n";
+    const stats = countDiffStats(diff);
+    expect(stats.hasBinary).toBe(true);
+    expect(stats.files).toBe(1);
+  });
+
+  it("returns a zeroed stat for an empty or headerless diff", () => {
+    expect(countDiffStats("")).toEqual({ files: 0, insertions: 0, deletions: 0, hasBinary: false });
+    expect(countDiffStats("no headers here\n")).toEqual({
+      files: 0,
+      insertions: 0,
+      deletions: 0,
+      hasBinary: false,
+    });
+  });
+});
+
+describe("buildDiffOverview", () => {
+  it("lists a total line and per-file stats", () => {
+    const diff = "diff --git a/a.txt b/a.txt\n@@ -1,2 +1,3 @@\n-x\n+y\n+z\n";
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("1 file changed, 2 insertions(+), 1 deletion(-)");
+    expect(overview).toContain("a/a.txt: +2/-1");
+  });
+
+  it("flags binary files in the per-file line", () => {
+    const diff =
+      "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n" +
+      "diff --git a/code.ts b/code.ts\n@@ -1 +1 @@\n-x\n+y\n";
+    const overview = buildDiffOverview(diff, 2000);
+    expect(overview).toContain("2 files changed");
+    expect(overview).toMatch(/img\.png: .*\(binary\)/);
+    expect(overview).toContain("code.ts: +1/-1");
+  });
+
+  it("returns an empty string for a headerless diff", () => {
+    expect(buildDiffOverview("not a diff\n", 1000)).toBe("");
+  });
+
+  it("drops per-file lines beyond the budget but keeps the total", () => {
+    const diff = makeFile("a/big-name-here.txt", 5) + makeFile("c/other.txt", 5);
+    const overview = buildDiffOverview(diff, 60);
+    expect(overview).toContain("2 files changed");
+    expect(overview.split("\n")).toHaveLength(1);
+  });
+});
+
+describe("computeDiffBudget", () => {
+  it("scales linearly with the context window", () => {
+    // 16k context → 16_000 * 0.75 * 4 = 48_000 bytes.
+    expect(computeDiffBudget(16_000)).toBe(48_000);
+    expect(computeDiffBudget(8_000)).toBe(24_000);
+  });
+
+  it("never exceeds the default 60 KB cap", () => {
+    expect(computeDiffBudget(200_000)).toBe(DEFAULT_MAX_DIFF_BYTES);
+  });
+
+  it("never drops below the MIN floor for tiny contexts", () => {
+    expect(computeDiffBudget(1_024)).toBe(4_000);
   });
 });
 
