@@ -60,6 +60,87 @@ function parseEntry(lines: string[]): { added: number; deleted: number; isBinary
   return { added, deleted, isBinary };
 }
 
+/**
+ * Decode a path as rendered by git's `core.quotePath` (`"..."` form): handle
+ * `\n`, `\t`, `\\`, `\"` and `\ooo` octal byte escapes. Unquoted input is
+ * returned unchanged. Octal sequences are collected as raw bytes and decoded
+ * as UTF-8 so non-ASCII paths (e.g. `a/\303\251.txt`) render correctly.
+ */
+function unquoteGitPath(raw: string): string {
+  if (!raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const bytes: number[] = [];
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i] ?? "";
+    if (ch !== "\\") {
+      bytes.push((ch.codePointAt(0) ?? 0) & 0xff);
+      continue;
+    }
+    const next = inner[i + 1];
+    if (next === undefined) {
+      bytes.push(ch.codePointAt(0) ?? 0);
+      break;
+    }
+    if (next === "n") {
+      bytes.push(10);
+      i += 1;
+    } else if (next === "t") {
+      bytes.push(9);
+      i += 1;
+    } else if (next === "\\" || next === '"') {
+      bytes.push(next.codePointAt(0) ?? 0);
+      i += 1;
+    } else if (next >= "0" && next <= "3") {
+      const digits = inner.slice(i + 1, i + 4);
+      const code = Number.parseInt(digits, 8);
+      if (digits.length === 3 && !Number.isNaN(code) && code <= 255) {
+        bytes.push(code);
+        i += 3;
+      } else {
+        bytes.push(ch.codePointAt(0) ?? 0, next.codePointAt(0) ?? 0);
+        i += 1;
+      }
+    } else {
+      bytes.push(ch.codePointAt(0) ?? 0, next.codePointAt(0) ?? 0);
+      i += 1;
+    }
+  }
+  return new TextDecoder("utf-8").decode(Uint8Array.from(bytes));
+}
+
+/** Path on a `---`/`+++` line. Git appends a trailing tab when the unquoted path itself has trailing whitespace. */
+function fileLinePath(rest: string): string {
+  const stripped = rest.endsWith("\t") ? rest.slice(0, -1) : rest;
+  return unquoteGitPath(stripped);
+}
+
+/** Old path from a `Binary files a/X and b/Y differ` line (binary entries carry no `---`/`+++` lines). */
+function binaryOldPath(line: string): string {
+  const parts = line.slice("Binary files ".length).split(" and ");
+  const old = parts[0] ?? "";
+  if (old === "/dev/null") return unquoteGitPath(parts[1] ?? "");
+  return unquoteGitPath(old);
+}
+
+/**
+ * Best-effort old path of a `diff --git` entry. Prefers the `---`/`+++` file
+ * lines — git renders the full path there even when it contains spaces — then
+ * the `Binary files` line, and falls back to the header's first token.
+ */
+function entryOldPath(header: string, entry: string[]): string {
+  for (const line of entry) {
+    if (line.startsWith("Binary files ")) return binaryOldPath(line);
+    if (line.startsWith("--- ") && !line.startsWith("--- /dev/null")) {
+      return fileLinePath(line.slice("--- ".length));
+    }
+    if (line.startsWith("+++ ") && !line.startsWith("+++ /dev/null")) {
+      return fileLinePath(line.slice("+++ ".length));
+    }
+  }
+  const first = header.slice("diff --git ".length).split(/\s/)[0] ?? "";
+  return unquoteGitPath(first);
+}
+
 /** Derived change statistics for a whole diff. */
 export interface DiffStat {
   files: number;
@@ -116,7 +197,6 @@ export function buildDiffOverview(diff: string, budget: number): string {
       continue;
     }
     const header = lines[i] ?? "";
-    const path = header.slice("diff --git ".length).split(/\s/)[0] ?? header;
     const entry: string[] = [];
     let j = i + 1;
     for (; j < lines.length; j++) {
@@ -125,6 +205,7 @@ export function buildDiffOverview(diff: string, budget: number): string {
       entry.push(next);
     }
     const perFile = parseEntry(entry);
+    const path = entryOldPath(header, entry);
     const suffix = perFile.isBinary ? " (binary)" : "";
     const details = `  ${path}: +${perFile.added}/-${perFile.deleted}${suffix}`;
     if (statsLines.join("\n").length + details.length + 1 <= budget) {

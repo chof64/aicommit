@@ -173,6 +173,39 @@ describe("buildDiffOverview", () => {
     expect(buildDiffOverview("not a diff\n", 1000)).toBe("");
   });
 
+  it("renders the full path for filenames containing spaces", () => {
+    // Git keeps spaces in unquoted ---/+++ file lines, so the overview must
+    // show the whole path, not just the first whitespace-separated token.
+    const diff =
+      "diff --git a/my file.txt b/my file.txt\n--- a/my file.txt\t\n+++ b/my file.txt\t\n@@ -1 +1 @@\n-x\n+y\n";
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("a/my file.txt: +1/-1");
+  });
+
+  it("unquotes git-escaped quoted paths", () => {
+    const diff =
+      'diff --git "a/qu\\"ote.txt" "b/qu\\"ote.txt"\n' +
+      '--- "a/qu\\"ote.txt"\n+++ "b/qu\\"ote.txt"\n@@ -1 +1 @@\n-x\n+y\n';
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain('a/qu"ote.txt: +1/-1');
+  });
+
+  it("decodes octal byte escapes for non-ASCII filenames", () => {
+    const diff =
+      'diff --git "a/\\303\\251.txt" "b/\\303\\251.txt"\n' +
+      '--- "a/\\303\\251.txt"\n+++ "b/\\303\\251.txt"\n@@ -1 +1 @@\n-x\n+y\n';
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("a/é.txt: +1/-1");
+  });
+
+  it("shows the full binary path from the Binary files line", () => {
+    const diff =
+      "diff --git a/img file.png b/img file.png\n" +
+      "Binary files a/img file.png and b/img file.png differ\n";
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("a/img file.png: +0/-0 (binary)");
+  });
+
   it("drops per-file lines beyond the budget but keeps the total", () => {
     const diff = makeFile("a/big-name-here.txt", 5) + makeFile("c/other.txt", 5);
     const overview = buildDiffOverview(diff, 60);
