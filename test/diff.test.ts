@@ -140,6 +140,13 @@ describe("countDiffStats", () => {
     expect(stats.files).toBe(1);
   });
 
+  it("counts hunk body lines that start with +++ or ---", () => {
+    const diff = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n-zz\n+++notHeader\n";
+    const stats = countDiffStats(diff);
+    expect(stats.insertions).toBe(1);
+    expect(stats.deletions).toBe(1);
+  });
+
   it("returns a zeroed stat for an empty or headerless diff", () => {
     expect(countDiffStats("")).toEqual({ files: 0, insertions: 0, deletions: 0, hasBinary: false });
     expect(countDiffStats("no headers here\n")).toEqual({
@@ -204,6 +211,27 @@ describe("buildDiffOverview", () => {
       "Binary files a/img file.png and b/img file.png differ\n";
     const overview = buildDiffOverview(diff, 1000);
     expect(overview).toContain("a/img file.png: +0/-0 (binary)");
+  });
+
+  it("renders the new path for a newly-added binary file", () => {
+    const diff = "diff --git a/img.png b/img.png\nBinary files /dev/null and b/img.png differ\n";
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("b/img.png: +0/-0 (binary)");
+    expect(overview).not.toContain("differ");
+  });
+
+  it("renders the old path for a deleted binary file", () => {
+    const diff = "diff --git a/img.png b/img.png\nBinary files a/img.png and /dev/null differ\n";
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("a/img.png: +0/-0 (binary)");
+  });
+
+  it("keeps a new-binary path containing ' and ' intact", () => {
+    const diff =
+      "diff --git a/foo and bar.png b/foo and bar.png\n" +
+      "Binary files /dev/null and b/foo and bar.png differ\n";
+    const overview = buildDiffOverview(diff, 1000);
+    expect(overview).toContain("b/foo and bar.png: +0/-0 (binary)");
   });
 
   it("drops per-file lines beyond the budget but keeps the total", () => {

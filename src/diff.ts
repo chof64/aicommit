@@ -54,8 +54,8 @@ function parseEntry(lines: string[]): { added: number; deleted: number; isBinary
       continue;
     }
     if (!inHunk) continue;
-    if (line.startsWith("+") && !line.startsWith("+++")) added += 1;
-    else if (line.startsWith("-") && !line.startsWith("---")) deleted += 1;
+    if (line.startsWith("+")) added += 1;
+    else if (line.startsWith("-")) deleted += 1;
   }
   return { added, deleted, isBinary };
 }
@@ -116,9 +116,13 @@ function fileLinePath(rest: string): string {
 
 /** Old path from a `Binary files a/X and b/Y differ` line (binary entries carry no `---`/`+++` lines). */
 function binaryOldPath(line: string): string {
-  const parts = line.slice("Binary files ".length).split(" and ");
-  const old = parts[0] ?? "";
-  if (old === "/dev/null") return unquoteGitPath(parts[1] ?? "");
+  const body = line.slice("Binary files ".length);
+  const stripped = body.endsWith(" differ") ? body.slice(0, -" differ".length) : body;
+  const sep = stripped.indexOf(" and ");
+  if (sep === -1) return unquoteGitPath(stripped);
+  const old = stripped.slice(0, sep);
+  const rest = stripped.slice(sep + " and ".length);
+  if (old === "/dev/null") return unquoteGitPath(rest);
   return unquoteGitPath(old);
 }
 
