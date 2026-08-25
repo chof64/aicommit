@@ -1,12 +1,24 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText } from "ai";
 import type { Config } from "./config.js";
-import { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff } from "./diff.js";
+import {
+  buildDiffPayload,
+  computeDiffBudget,
+  DEFAULT_CONTEXT_LINES,
+  DEFAULT_MAX_DIFF_BYTES,
+  truncateDiff,
+} from "./diff.js";
 import { HttpApiError, NetworkError, ParseError, TimeoutError } from "./errors.js";
 import { logVerbose, logWarning } from "./logger.js";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./pkg.js";
 
-export { DEFAULT_CONTEXT_LINES, DEFAULT_MAX_DIFF_BYTES, truncateDiff };
+export {
+  buildDiffPayload,
+  computeDiffBudget,
+  DEFAULT_CONTEXT_LINES,
+  DEFAULT_MAX_DIFF_BYTES,
+  truncateDiff,
+};
 
 export const TIMEOUT_MS = 60_000;
 
@@ -32,6 +44,17 @@ export const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION}`;
 export function buildUserPrompt(hint: string, diff: string): string {
   const hintPrefix = hint ? `Context/hint: ${hint} ` : "";
   return `${hintPrefix}${USER_PROMPT_TAIL}\n\n${diff}`;
+}
+
+/**
+ * Compose the full user message for a given byte budget: a scope overview
+ * (always from the full diff) followed by the size-bounded diff body. The
+ * overview prefix is dropped entirely when there is nothing to show.
+ */
+function buildUserContent(hint: string, diff: string, budget: number): string {
+  const { overview, body } = buildDiffPayload(diff, budget);
+  const composed = overview ? `${overview}\n\n${body}` : body;
+  return buildUserPrompt(hint, composed);
 }
 
 /** Truncate a string for safe verbose logging. */
@@ -132,11 +155,11 @@ async function callOnce(config: Config, prompt: string, signal: AbortSignal): Pr
  * exponential backoff up to {@link MAX_RETRIES}; non-retriable failures throw
  * immediately.
  *
- * On the specific 400 `context_length_exceeded` error, attempts a single
- * automatic retry with a truncated diff before falling through to the
- * normal retry policy. This consumes one of the MAX_RETRIES slots but
- * skips backoff (the failure is deterministic, not transient). Truncation
- * always re-derives from the source-of-truth `diff`, never from a
+ * The diff is proactively budgeted against the model's context window
+ * (`config.contextTokens`) before the first request: the body is hunk-truncated
+ * and a scope overview (from the full diff) is prefixed. On the specific 400
+ * `context_length_exceeded` error, one automatic retry halves the budget —
+ * truncation always re-derives from the source-of-truth `diff`, never from a
  * previously truncated version.
  */
 export async function generateCommitMessage(
@@ -147,7 +170,8 @@ export async function generateCommitMessage(
   let lastError: unknown;
   let elapsedWait = 0;
   let truncationAttempted = false;
-  let workingDiff = diff;
+  let budget = computeDiffBudget(config.contextTokens);
+  let content = buildUserContent(hint, diff, budget);
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -155,7 +179,7 @@ export async function generateCommitMessage(
 
     try {
       logVerbose("Sending request to API...");
-      const text = await callOnce(config, buildUserPrompt(hint, workingDiff), controller.signal);
+      const text = await callOnce(config, content, controller.signal);
       clearTimeout(timer);
 
       const message = validateCommitMessage(text);
@@ -169,17 +193,16 @@ export async function generateCommitMessage(
         `Retry attempt ${attempt + 1}/${MAX_RETRIES + 1} failed (${category}): ${err instanceof Error ? err.message : String(err)}`,
       );
 
-      // Single-shot recovery for context overflow: truncate the diff and
+      // Single-shot recovery for context overflow: halve the budget and
       // retry immediately. We skip backoff because the failure is
       // deterministic — waiting won't help. This consumes one of the
       // remaining MAX_RETRIES slots.
       if (err instanceof HttpApiError && err.contextExceeded && !truncationAttempted) {
         truncationAttempted = true;
-        workingDiff = truncateDiff(diff);
-        logVerbose(
-          `Diff exceeds context window; truncated to ${workingDiff.length} bytes and retrying once`,
-        );
-        logWarning("Diff exceeded model context window; retrying with a truncated diff");
+        budget = Math.floor(budget / 2);
+        content = buildUserContent(hint, diff, budget);
+        logVerbose(`Diff exceeds context window; retrying once with a budget of ${budget} bytes`);
+        logWarning("Diff exceeded model context window; retrying with a smaller diff");
         continue;
       }
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BASE_URL, DEFAULT_MODEL, loadConfig } from "../src/config.js";
+import {
+  DEFAULT_BASE_URL,
+  DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MODEL,
+  loadConfig,
+} from "../src/config.js";
 
 describe("loadConfig", () => {
   it("defaults to the opencode zen endpoint and big-pickle model", () => {
@@ -7,6 +12,7 @@ describe("loadConfig", () => {
       baseURL: DEFAULT_BASE_URL,
       apiKey: undefined,
       model: DEFAULT_MODEL,
+      contextTokens: DEFAULT_CONTEXT_TOKENS,
     });
     expect(DEFAULT_BASE_URL).toBe("https://opencode.ai/zen/v1");
     expect(DEFAULT_MODEL).toBe("big-pickle");
@@ -49,5 +55,19 @@ describe("loadConfig", () => {
     });
     expect(config.baseURL).toBe(DEFAULT_BASE_URL);
     expect(config.model).toBe(DEFAULT_MODEL);
+  });
+
+  it("reads AICOMMIT_CONTEXT_TOKENS", () => {
+    expect(loadConfig({ AICOMMIT_CONTEXT_TOKENS: "100000" }).contextTokens).toBe(100_000);
+  });
+
+  it("falls back to the default for unset, blank, or invalid context tokens", () => {
+    expect(loadConfig({ AICOMMIT_CONTEXT_TOKENS: "" }).contextTokens).toBe(DEFAULT_CONTEXT_TOKENS);
+    expect(loadConfig({ AICOMMIT_CONTEXT_TOKENS: "not-a-number" }).contextTokens).toBe(
+      DEFAULT_CONTEXT_TOKENS,
+    );
+    expect(loadConfig({ AICOMMIT_CONTEXT_TOKENS: "100" }).contextTokens).toBe(
+      DEFAULT_CONTEXT_TOKENS,
+    );
   });
 });

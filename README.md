@@ -37,6 +37,7 @@ export AICOMMIT_API_KEY=<your-key>
 | `AICOMMIT_API_KEY`   | — (optional)                  | API key sent as `Authorization: Bearer <key>`.     |
 | `AICOMMIT_BASE_URL`  | `https://opencode.ai/zen/v1`  | OpenAI-compatible root URL of the endpoint.        |
 | `AICOMMIT_MODEL`     | `big-pickle`                  | Model id served at the endpoint.                   |
+| `AICOMMIT_CONTEXT_TOKENS` | `16000`                   | Assumed model context window, used to size the diff sent to the model. |
 
 `OPENCODE_API_KEY` is still honored as a fallback for `AICOMMIT_API_KEY`.
 
@@ -82,12 +83,16 @@ You will always be asked to confirm before `git commit` runs. Press `n` (or
 ## How it works
 
 1. Runs `git diff --cached` and aborts if nothing is staged.
-2. Sends the diff (plus any hint) to the configured OpenAI-compatible
+2. Sizes the diff against the model's assumed context window (see
+   `AICOMMIT_CONTEXT_TOKENS`): large diffs are trimmed hunk-by-hunk before
+   anything is sent, and a short scope summary (files changed, +/- lines per
+   file) is prepended so the model sees the full size of the change.
+3. Sends the diff (plus any hint) to the configured OpenAI-compatible
    chat-completions endpoint (default: opencode.ai zen, `big-pickle`) via the
    [Vercel AI SDK](https://ai-sdk.dev) (`@ai-sdk/openai-compatible`).
-3. Asks the LLM for a single conventional-commit message
+4. Asks the LLM for a single conventional-commit message
    (`<type>: <description>`).
-4. Shows you the result, waits for `Y/n`, then runs `git commit -m`.
+5. Shows you the result, waits for `Y/n`, then runs `git commit -m`.
 
 The full prompt sent to the model is in
 [`src/api.ts`](./src/api.ts) — see `SYSTEM_PROMPT` and `USER_PROMPT_TAIL`.
@@ -110,7 +115,10 @@ I'm planning to add a few features as time goes on:
 
 - **Customizable commit types** — including support for the Angular
   convention
-- **Optimizations** — to the current version and the prompt
+- **Hierarchical diff summarization** — for changes too large to fit even a
+  trimmed diff, summarize each file's diff in its own call, then combine the
+  summaries (currently, oversized diffs are trimmed to the model's context
+  window instead)
 - **Tests** — coverage for the core flow
 
 ## License
